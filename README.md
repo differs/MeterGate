@@ -30,8 +30,9 @@ All open-source LLM relays have the same two blind spots — **we measured them*
 - [x] Request-level metering events (request_id idempotency key) — **M1 done** (log sink; Kafka seam ready)
 - [x] **Dual-track billing** — Redis Lua atomic pre-charge (fast path, 402 on insufficient balance) + async settle into PostgreSQL (slow path, terminal-state orders, idempotent) — **M2 done**
 - [x] Reconcile CLI (`cmd/reconcile`): day summary by status, anomaly scan, frozen-balance sweep — **M2 done**
+- [x] **Routing engine** — multi-channel, inverse-square price weighting (~9:1 at 3x price gap, verified), 30s failure window, per-channel circuit breaker, automatic failover (4xx never retries) — **M3 done**
 - [ ] Pluggable ledger (`LedgerAdapter`: PostgreSQL first, TigerBeetle later)
-- [ ] In-memory routing snapshot (zero DB calls on hot path)
+- [ ] In-memory routing snapshot (zero DB calls on hot path) — partial: immutable atomic snapshot swap in place
 - [ ] Batch-committed bill writes (500 rows/commit, fsync 15K/s → 30/s)
 - [ ] Three-layer reconciliation + auto-refund
 
@@ -89,9 +90,40 @@ PostgreSQL — terminal order rows keyed by `request_id`, safe to replay.
 
 - [x] **M1** Single-node gateway + streaming metering + request-level events — **done**
 - [x] **M2** Dual-track billing (Redis pre-charge + async settle into PostgreSQL) + reconcile CLI — **done**
-- [ ] **M3** Routing engine (price-weighted, 30s failure window, circuit breaker)
+- [x] **M3** Routing engine (price-weighted, 30s failure window, circuit breaker) — **done**
 - [ ] **M4** Three-layer reconciliation + auto-refund + admin API
 - [ ] **M5** ClickHouse detail tier + batch commit pipeline
+
+## Routing (M3)
+
+Multi-channel routing mirrors OpenRouter's default strategy. See
+`configs/routing.example.yaml`:
+
+```yaml
+channels:
+  - id: openai
+    base_url: https://api.openai.com/v1/chat/completions
+    key_env: CHANNEL_OPENAI_KEY
+    input_per_1m: 2500000
+    output_per_1m: 10000000
+models:
+  - model: gpt-4o
+    channels: [openai, azure-openai]   # failover + price-weighted balancing
+```
+
+```bash
+METERGATE_CONFIG=./configs/routing.example.yaml ./metergate
+```
+
+- **Inverse-square price weighting**: a $1 channel gets ~9x the traffic of
+  a $3 channel (verified in load test: 9.5:1 at 200 requests).
+- **30s failure window**: channels with significant recent failures are
+  deprioritized but kept as last-resort fallbacks.
+- **Circuit breaker**: Closed → Open (fast-fail) → HalfOpen (probe) → Closed;
+  exponential backoff capped at 5 minutes.
+- **Failover**: primary → fallbacks; 4xx client errors never retry
+  (verified: killing the primary channel yields 100% successful requests
+  through the fallback).
 
 ## License
 

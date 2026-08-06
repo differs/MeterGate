@@ -100,7 +100,7 @@ func (s *Server) handleNonStream(ctx context.Context, w http.ResponseWriter, cal
 		RequestID:        call.RequestID,
 		UserID:           call.UserID,
 		Model:            call.Model,
-		Provider:         call.UpstreamURL,
+		Provider:         providerOf(call),
 		Status:           status,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
@@ -161,7 +161,7 @@ func (s *Server) handleStream(ctx context.Context, w http.ResponseWriter, call *
 		RequestID:        call.RequestID,
 		UserID:           call.UserID,
 		Model:            call.Model,
-		Provider:         call.UpstreamURL,
+		Provider:         providerOf(call),
 		Status:           status,
 		PromptTokens:     u.PromptTokens,
 		CompletionTokens: u.CompletionTokens,
@@ -182,6 +182,13 @@ func (s *Server) emit(ev metering.Event) {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+func providerOf(call *ChatCall) string {
+	if call.Provider != "" {
+		return call.Provider
+	}
+	return call.UpstreamURL
+}
 
 func maxTokensPtr(v *int) *int64 {
 	if v == nil {

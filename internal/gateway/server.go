@@ -46,6 +46,9 @@ type ChatCall struct {
 	// UpstreamURL / UpstreamKey are resolved by the caller-provided router.
 	UpstreamURL string
 	UpstreamKey string
+	// Provider is the winning channel ID (set by the routing upstream),
+	// recorded in the metering event.
+	Provider string
 }
 
 // ChatResult is the outcome of a non-streaming call.

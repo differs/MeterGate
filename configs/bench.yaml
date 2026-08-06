@@ -1,0 +1,16 @@
+channels:
+  - id: cheap
+    name: CheapMock
+    base_url: http://127.0.0.1:9901/v1/chat/completions
+    key_env: BENCH_KEY_CHEAP
+    input_per_1m: 1000000
+    output_per_1m: 1000000
+  - id: pricey
+    name: PriceyMock
+    base_url: http://127.0.0.1:9902/v1/chat/completions
+    key_env: BENCH_KEY_PRICY
+    input_per_1m: 3000000
+    output_per_1m: 3000000
+models:
+  - model: gpt-4o
+    channels: [cheap, pricey]

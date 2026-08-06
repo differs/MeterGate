@@ -1,0 +1,52 @@
+# MeterGate routing configuration (M3).
+#
+# The routing engine mirrors OpenRouter's default strategy:
+#   - channels with failures in the last 30s are deprioritized
+#   - among stable channels, traffic is weighted by inverse-square price
+#     (cheapest reliable channel wins most requests)
+#   - per-channel circuit breaker fast-fails during outages and probes
+#     for recovery
+#   - failed channels fall through to the next candidate; 4xx never retries
+#
+# Prices are COST prices in micro-units per 1M tokens
+# (1_000_000 micros = 1 unit of base currency).
+# Keys are read from environment variables (never stored in the file).
+
+channels:
+  - id: openai
+    name: OpenAI
+    base_url: https://api.openai.com/v1/chat/completions
+    key_env: CHANNEL_OPENAI_KEY
+    input_per_1m: 2500000   # $2.50 / 1M input
+    output_per_1m: 10000000 # $10.00 / 1M output
+    weight: 1
+
+  - id: azure-openai
+    name: Azure OpenAI
+    base_url: https://your-resource.openai.azure.com/openai/deployments/gpt-4o/chat/completions
+    key_env: CHANNEL_AZURE_KEY
+    input_per_1m: 2500000
+    output_per_1m: 10000000
+    weight: 1
+
+  - id: deepseek
+    name: DeepSeek
+    base_url: https://api.deepseek.com/v1/chat/completions
+    key_env: CHANNEL_DEEPSEEK_KEY
+    input_per_1m: 270000   # $0.27 / 1M input
+    output_per_1m: 1100000 # $1.10 / 1M output
+    weight: 1
+
+# Model → channels. A model served by several channels gets automatic
+# failover and price-weighted load balancing across them.
+models:
+  - model: gpt-4o
+    channels: [openai, azure-openai]
+
+  - model: deepseek-chat
+    channels: [deepseek]
+
+  # Same model on multiple channels of different prices: the cheaper one
+  # (azure-openai at $10 vs openai at $12) wins most traffic.
+  - model: gpt-4o-mini
+    channels: [openai, azure-openai]

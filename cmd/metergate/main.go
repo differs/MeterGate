@@ -14,6 +14,11 @@
 //	METERGATE_REDIS_ADDR    Redis address (pre-charge fast path)
 //	METERGATE_PG_DSN        PostgreSQL DSN (terminal order storage)
 //
+// Routing (optional — single upstream without it):
+//
+//	METERGATE_CONFIG        routing config YAML (multi-channel, price-weighted,
+//	                        30s failure window, circuit breaker)
+//
 // Example (full stack):
 //
 //	METERGATE_UPSTREAM=http://127.0.0.1:9901/v1/chat/completions \
@@ -35,6 +40,7 @@ import (
 
 	"github.com/differs/MeterGate/internal/billing"
 	"github.com/differs/MeterGate/internal/gateway"
+	"github.com/differs/MeterGate/internal/router"
 )
 
 func envOr(key, def string) string {
@@ -51,12 +57,13 @@ func main() {
 	port := envOr("METERGATE_PORT", "3000")
 	upstreamURL := envOr("METERGATE_UPSTREAM", "")
 	upstreamKey := envOr("METERGATE_UPSTREAM_KEY", "")
+	configPath := envOr("METERGATE_CONFIG", "")
 	redisAddr := envOr("METERGATE_REDIS_ADDR", "")
 	pgDSN := envOr("METERGATE_PG_DSN", "")
 
 	apiKeys := splitKeys(os.Getenv("METERGATE_API_KEYS"))
-	if upstreamURL == "" {
-		logger.Error("METERGATE_UPSTREAM is required")
+	if upstreamURL == "" && configPath == "" {
+		logger.Error("METERGATE_UPSTREAM or METERGATE_CONFIG is required")
 		os.Exit(1)
 	}
 	if len(apiKeys) == 0 {
@@ -123,12 +130,34 @@ func main() {
 		opts = append(opts, gateway.WithMeteringSink(sink))
 	}
 
-	up := gateway.NewHTTPUpstream(upstreamURL, upstreamKey)
+	// --- upstream: routing engine (M3) or single upstream ---
+	var up gateway.Upstream
+	if configPath != "" {
+		cfg, err := router.LoadConfig(configPath)
+		if err != nil {
+			logger.Error("routing config invalid", "err", err)
+			os.Exit(1)
+		}
+		snap, err := router.BuildSnapshot(cfg)
+		if err != nil {
+			logger.Error("routing config invalid", "err", err)
+			os.Exit(1)
+		}
+		r := router.NewRouter(snap)
+		up = router.NewRoutingUpstream(r)
+		logger.Info("routing engine enabled",
+			"channels", len(cfg.Channels),
+			"models", len(cfg.Models),
+			"config", configPath)
+	} else {
+		up = gateway.NewHTTPUpstream(upstreamURL, upstreamKey)
+	}
 	srv := gateway.NewServer(up, opts...)
 
 	logger.Info("metergate starting",
 		"port", port,
 		"upstream", upstreamURL,
+		"config", configPath,
 		"api_keys", len(apiKeys),
 		"precharge", precharger != nil,
 		"order_store", store != nil,
