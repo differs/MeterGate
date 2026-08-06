@@ -25,9 +25,10 @@ All open-source LLM relays have the same two blind spots — **we measured them*
 
 ## Features
 
-- [ ] OpenAI-compatible endpoint (`/v1/chat/completions`, SSE streaming)
-- [ ] Dual-track billing engine (pre-charge + exact accumulation)
-- [ ] Streaming token metering with local tokenizer cross-validation
+- [x] OpenAI-compatible endpoint (`/v1/chat/completions`, SSE streaming) — **M1 done**
+- [x] Streaming token metering with local tokenizer cross-validation — **M1 done** (approximate estimator; tiktoken seam ready)
+- [x] Request-level metering events (request_id idempotency key) — **M1 done** (log sink; Kafka seam ready)
+- [ ] Dual-track billing engine (Redis pre-charge + async exact accumulation)
 - [ ] Daily reconciliation CLI with auto-refund
 - [ ] Pluggable ledger (`LedgerAdapter`: PostgreSQL first, TigerBeetle later)
 - [ ] In-memory routing snapshot (zero DB calls on hot path)
@@ -49,12 +50,25 @@ client ──▶ Edge LB ──▶ Gateway (stateless, Go)
 ## Quick Start
 
 ```bash
-# coming soon — docker compose one-liner
-docker compose up -d
+# build
+go build -o metergate ./cmd/metergate
+
+# run against any OpenAI-compatible upstream
+METERGATE_UPSTREAM=http://127.0.0.1:9901/v1/chat/completions \
+METERGATE_UPSTREAM_KEY=sk-upstream \
+METERGATE_API_KEYS=sk-your-key \
+./metergate
+
+# call it like OpenAI
 curl http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```
+
+Metering events are emitted as structured logs (JSON) per request —
+`status`, `prompt_tokens`, `completion_tokens`, `duration_ms` —
+the seam where Kafka/ClickHouse sinks plug in for the full billing pipeline.
 
 ## Roadmap
 
