@@ -54,6 +54,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	est := metering.ApproxEstimator{}
 	promptTokens := metering.EstimatePromptTokens(est, req.Messages)
 
+	// Billing fast path: reserve funds before touching the upstream.
+	if s.preCharge != nil {
+		if err := s.preCharge(ctx, userID, call.RequestID, req.Model, int64(promptTokens), maxTokensPtr(req.MaxTokens)); err != nil {
+			writeError(w, http.StatusPaymentRequired, "insufficient balance or pre-charge rejected")
+			return
+		}
+	}
+
 	if req.Stream {
 		s.handleStream(ctx, w, call, promptTokens, est)
 		return
@@ -164,13 +172,24 @@ func (s *Server) handleStream(ctx context.Context, w http.ResponseWriter, call *
 
 func (s *Server) emit(ev metering.Event) {
 	ev.Timestamp = s.now()
-	// M1: structured log sink. The sink interface lets Kafka/ClickHouse
-	// backends replace this without touching the data plane.
+	// Always log (audit trail, zero-dependency default sink).
 	b, _ := json.Marshal(ev)
 	s.log.Info("metering", "event", string(b))
+	// Forward to the billing pipeline when wired (M2+).
+	if s.sink != nil {
+		_ = s.sink.Emit(ev)
+	}
 }
 
 // --- helpers ---------------------------------------------------------------
+
+func maxTokensPtr(v *int) *int64 {
+	if v == nil {
+		return nil
+	}
+	vv := int64(*v)
+	return &vv
+}
 
 func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")

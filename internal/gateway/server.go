@@ -13,7 +13,17 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/differs/MeterGate/internal/metering"
 )
+
+// ctxKeyUserID is defined in middleware.go.
+
+// PreChargeFunc reserves funds for a request before upstream forwarding.
+// Returning an error rejects the request (e.g. insufficient balance).
+// This is the billing fast path; the async settle track releases the
+// remainder after the stream terminates.
+type PreChargeFunc func(ctx context.Context, userID, requestID, model string, promptTokens int64, maxTokens *int64) error
 
 // Upstream is a model provider the gateway forwards to.
 type Upstream interface {
@@ -51,6 +61,8 @@ type ChatResult struct {
 type Server struct {
 	upstream  Upstream
 	keys      map[string]bool // accepted API keys (M1: static; later: store)
+	sink      metering.Sink   // optional billing event sink (M2+)
+	preCharge PreChargeFunc   // optional billing fast path (M2+)
 	log       *slog.Logger
 	httpSrv   *http.Server
 	now       func() time.Time
@@ -68,6 +80,16 @@ func WithKeys(keys []string) Option {
 			s.keys[k] = true
 		}
 	}
+}
+
+// WithPreCharge attaches the billing fast path (atomic fund reservation).
+func WithPreCharge(fn PreChargeFunc) Option {
+	return func(s *Server) { s.preCharge = fn }
+}
+
+// WithMeteringSink attaches a billing event sink (settle pipeline).
+func WithMeteringSink(sink metering.Sink) Option {
+	return func(s *Server) { s.sink = sink }
 }
 
 // WithLogger overrides the default logger.

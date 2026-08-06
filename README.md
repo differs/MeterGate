@@ -28,35 +28,44 @@ All open-source LLM relays have the same two blind spots — **we measured them*
 - [x] OpenAI-compatible endpoint (`/v1/chat/completions`, SSE streaming) — **M1 done**
 - [x] Streaming token metering with local tokenizer cross-validation — **M1 done** (approximate estimator; tiktoken seam ready)
 - [x] Request-level metering events (request_id idempotency key) — **M1 done** (log sink; Kafka seam ready)
-- [ ] Dual-track billing engine (Redis pre-charge + async exact accumulation)
-- [ ] Daily reconciliation CLI with auto-refund
+- [x] **Dual-track billing** — Redis Lua atomic pre-charge (fast path, 402 on insufficient balance) + async settle into PostgreSQL (slow path, terminal-state orders, idempotent) — **M2 done**
+- [x] Reconcile CLI (`cmd/reconcile`): day summary by status, anomaly scan, frozen-balance sweep — **M2 done**
 - [ ] Pluggable ledger (`LedgerAdapter`: PostgreSQL first, TigerBeetle later)
 - [ ] In-memory routing snapshot (zero DB calls on hot path)
 - [ ] Batch-committed bill writes (500 rows/commit, fsync 15K/s → 30/s)
+- [ ] Three-layer reconciliation + auto-refund
 
 ## Architecture
 
 ```
-client ──▶ Edge LB ──▶ Gateway (stateless, Go)
-                         │  routing snapshot (in-memory, no DB on hot path)
-                         ├─▶ Redis: pre-charge / rate-limit (atomic Lua)
-                         ├─▶ Kafka: metering events (request-level)
-                         ├─▶ ClickHouse: billing detail (audit, replayable)
-                         └─▶ PostgreSQL: account ledger (strong consistency)
-                                      ▲
-                         reconcile CLI ┘  three-layer daily check + auto-refund
+client ──▶ Gateway (stateless, Go)
+             │  fast path: Redis Lua pre-charge (atomic, no oversell)
+             │  hot path:  stream + local token metering
+             ▼
+           metering events (request-level, buffered sink — gateway never
+             │  blocks on billing)
+             ▼
+           Settler ──▶ PostgreSQL orders (terminal state, idempotent,
+                        append-only) ──▶ reconcile CLI (daily check + sweep)
 ```
 
 ## Quick Start
 
 ```bash
+# dependencies (or point at your own PG/Redis)
+docker run -d --name mg-pg -e POSTGRES_PASSWORD=mg -e POSTGRES_DB=metergate -p 5435:5432 postgres:16-alpine
+docker run -d --name mg-redis -p 6380:6379 redis:7-alpine
+
 # build
 go build -o metergate ./cmd/metergate
+go build -o reconcile ./cmd/reconcile
 
-# run against any OpenAI-compatible upstream
+# run against any OpenAI-compatible upstream, with full billing
 METERGATE_UPSTREAM=http://127.0.0.1:9901/v1/chat/completions \
 METERGATE_UPSTREAM_KEY=sk-upstream \
 METERGATE_API_KEYS=sk-your-key \
+METERGATE_REDIS_ADDR=127.0.0.1:6380 \
+METERGATE_PG_DSN=postgres://postgres:mg@127.0.0.1:5435/metergate \
 ./metergate
 
 # call it like OpenAI
@@ -66,14 +75,20 @@ curl http://localhost:3000/v1/chat/completions \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-Metering events are emitted as structured logs (JSON) per request —
-`status`, `prompt_tokens`, `completion_tokens`, `duration_ms` —
-the seam where Kafka/ClickHouse sinks plug in for the full billing pipeline.
+Every request is pre-charged atomically in Redis (rejected with `402` when
+the balance cannot cover the estimate) and settled asynchronously into
+PostgreSQL — terminal order rows keyed by `request_id`, safe to replay.
+
+```bash
+# daily reconciliation
+./reconcile --pg-dsn postgres://postgres:mg@127.0.0.1:5435/metergate \
+            --redis 127.0.0.1:6380 --sweep
+```
 
 ## Roadmap
 
-- [ ] **M1** Single-node gateway + streaming metering + dual-track billing (PostgreSQL)
-- [ ] **M2** Reconciliation CLI (Layer A: detail vs summary)
+- [x] **M1** Single-node gateway + streaming metering + request-level events — **done**
+- [x] **M2** Dual-track billing (Redis pre-charge + async settle into PostgreSQL) + reconcile CLI — **done**
 - [ ] **M3** Routing engine (price-weighted, 30s failure window, circuit breaker)
 - [ ] **M4** Three-layer reconciliation + auto-refund + admin API
 - [ ] **M5** ClickHouse detail tier + batch commit pipeline
