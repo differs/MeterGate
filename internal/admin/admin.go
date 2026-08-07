@@ -21,6 +21,7 @@ type API struct {
 	refunds  billing.RefundStore
 	pre      *billing.Precharger // may be nil
 	recon    *reconciliation.Reconciler
+	detail   *billing.DetailSink // may be nil (no ClickHouse)
 	adminKey string
 }
 
@@ -30,6 +31,12 @@ func New(orders billing.OrderStore, refunds billing.RefundStore,
 	return &API{orders: orders, refunds: refunds, pre: pre, recon: recon, adminKey: adminKey}
 }
 
+// WithDetailSink attaches the ClickHouse detail tier for traceability.
+func (a *API) WithDetailSink(d *billing.DetailSink) *API {
+	a.detail = d
+	return a
+}
+
 // Handler returns the admin HTTP handler with auth.
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -37,6 +44,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/orders", a.listOrders)
 	mux.HandleFunc("GET /admin/refunds", a.listRefunds)
 	mux.HandleFunc("POST /admin/reconcile", a.runReconcile)
+	mux.HandleFunc("GET /admin/billing/request", a.lookupRequest)
 	return a.auth(mux)
 }
 
@@ -102,6 +110,31 @@ func (a *API) listRefunds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"refunds": refunds})
+}
+
+// lookupRequest traces one request_id through the full billing chain:
+// ClickHouse detail (metering+price) + PostgreSQL order (settlement).
+func (a *API) lookupRequest(w http.ResponseWriter, r *http.Request) {
+	rid := r.URL.Query().Get("request_id")
+	if rid == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "request_id is required"})
+		return
+	}
+	out := map[string]any{"request_id": rid}
+
+	if a.detail != nil {
+		row, err := a.detail.Lookup(r.Context(), rid)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		if row != nil {
+			out["detail"] = row
+		} else {
+			out["detail"] = nil
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type reconcileReq struct {

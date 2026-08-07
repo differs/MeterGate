@@ -204,6 +204,12 @@ func main() {
 	opts := []gateway.Option{
 		gateway.WithKeys(apiKeys),
 		gateway.WithLogger(logger),
+		// Freeze request-start prices into metering events (accuracy: a
+		// mid-request price change must never reprice in-flight requests).
+		gateway.WithPriceSnapshot(func(model string) (int64, int64, bool) {
+			p := billing.PriceFor(model)
+			return p.InputPer1M, p.OutputPer1M, true
+		}),
 	}
 	if precharger != nil {
 		opts = append(opts, gateway.WithPreCharge(func(ctx context.Context, userID, requestID, model string, promptTokens int64, maxTokens *int64) error {

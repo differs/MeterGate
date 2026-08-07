@@ -54,6 +54,14 @@ type OrderStore interface {
 	NegativeAmountOrders(ctx context.Context, day string) ([]Order, error)
 }
 
+// MyUsageRow is our side's aggregated usage for one provider+day.
+type MyUsageRow struct {
+	PromptTok  int64
+	ComplTok   int64
+	TotalTok   int64
+	CostMicros int64
+}
+
 // DaySummary aggregates one order status for one day.
 type DaySummary struct {
 	Count        int64

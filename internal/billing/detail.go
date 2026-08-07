@@ -105,7 +105,7 @@ SETTINGS index_granularity = 8192`
 // The amount is computed with the same pricing logic as the Settler so the
 // detail tier and the order tier always agree (Layer A reconciliation).
 func (s *DetailSink) Emit(ev metering.Event) error {
-	p := PriceFor(ev.Model)
+	p := priceFromEvent(ev)
 	completion := int64(ev.CompletionTokens)
 	amount := CalculateAmount(int64(ev.PromptTokens), completion, p)
 	if ev.Status == metering.StatusFailed {
@@ -194,6 +194,30 @@ func (s *DetailSink) flush() {
 		return
 	}
 	s.log.Debug("detail batch written", "count", len(rows))
+}
+
+// Lookup returns the detail row for one request_id (traceability).
+// Returns nil when not found (may still be buffered — check orders table).
+func (s *DetailSink) Lookup(ctx context.Context, requestID string) (*DetailRow, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT request_id, user_id, model, provider, status,
+		       prompt_tokens, completion_tokens, total_tokens,
+		       amount_micros, duration_ms, ttft_ms, ts
+		FROM billing_detail WHERE request_id = ? LIMIT 1`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, nil
+	}
+	var r DetailRow
+	if err := rows.Scan(&r.RequestID, &r.UserID, &r.Model, &r.Provider, &r.Status,
+		&r.PromptTokens, &r.CompletionTokens, &r.TotalTokens,
+		&r.AmountMicros, &r.DurationMs, &r.TTFTMs, &r.Ts); err != nil {
+		return nil, err
+	}
+	return &r, rows.Err()
 }
 
 // Close flushes remaining rows and closes the connection.

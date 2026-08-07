@@ -48,6 +48,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		req.Model = resolved
 	}
 
+	// Freeze the price at request start: settlement must use this, never
+	// the current table (in-flight requests are not repriced).
+	var snap *metering.PricingSnapshot
+	if s.priceSnap != nil {
+		if in, out, ok := s.priceSnap(req.Model); ok {
+			snap = &metering.PricingSnapshot{
+				InputPer1M:  in,
+				OutputPer1M: out,
+				EffectiveAt: s.now(),
+			}
+		}
+	}
+
 	call := &ChatCall{
 		RequestID: s.requestID(),
 		UserID:    userID,
@@ -57,6 +70,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// M1: upstream resolved from env config by the concrete upstream
 		// implementation; the routing engine replaces this in M3.
 	}
+	call.Pricing = snap
 
 	// Prompt metering (approximate; exact prompt tokens come from upstream).
 	est := metering.ApproxEstimator{}
@@ -91,6 +105,7 @@ func (s *Server) handleNonStream(ctx context.Context, w http.ResponseWriter, cal
 			Status:       metering.StatusFailed,
 			PromptTokens: promptTokens,
 			DurationMs:   s.now().Sub(start).Milliseconds(),
+			Pricing:      call.Pricing,
 		})
 		writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
@@ -125,6 +140,7 @@ func (s *Server) handleNonStream(ctx context.Context, w http.ResponseWriter, cal
 		CompletionTokens: completionTokens,
 		DurationMs:       s.now().Sub(start).Milliseconds(),
 		UpstreamUsageRaw: usageRaw,
+		Pricing:          call.Pricing,
 	})
 }
 
@@ -183,6 +199,7 @@ func (s *Server) handleStream(ctx context.Context, w http.ResponseWriter, call *
 		CompletionTokens: u.CompletionTokens,
 		TTFTMs:           s.now().Sub(start).Milliseconds(),
 		DurationMs:       s.now().Sub(start).Milliseconds(),
+		Pricing:          call.Pricing,
 	})
 }
 

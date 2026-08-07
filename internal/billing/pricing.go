@@ -1,5 +1,7 @@
 package billing
 
+import "sync/atomic"
+
 // Pricing table for M2. Prices are per 1M tokens, in micro-units of the
 // base currency (so "$2.00/1M" = 2_000_000 micros/1M).
 //
@@ -18,13 +20,74 @@ var defaultPrices = map[string]ModelPrice{
 }
 
 // PriceFor returns the price for a model, falling back to a safe default
-// so settlement never blocks on an unknown model.
+// so settlement never blocks on an unknown model. Reads go through the
+// atomically-swappable table, so operators can update prices at runtime.
 func PriceFor(model string) ModelPrice {
-	if p, ok := defaultPrices[model]; ok {
+	return priceTable.Load().Get(model)
+}
+
+// PriceTable is a concurrency-safe price map (atomic pointer swap).
+type PriceTable struct {
+	prices map[string]ModelPrice
+}
+
+// NewPriceTable builds a table from the defaults.
+func NewPriceTable() *PriceTable {
+	m := make(map[string]ModelPrice, len(defaultPrices))
+	for k, v := range defaultPrices {
+		m[k] = v
+	}
+	return &PriceTable{prices: m}
+}
+
+// Get returns the price for a model (safe default fallback).
+func (t *PriceTable) Get(model string) ModelPrice {
+	if p, ok := t.prices[model]; ok {
 		return p
 	}
 	return ModelPrice{InputPer1M: 1_000_000, OutputPer1M: 2_000_000}
 }
+
+// Set updates one model's price.
+func (t *PriceTable) Set(model string, p ModelPrice) {
+	m := make(map[string]ModelPrice, len(t.prices)+1)
+	for k, v := range t.prices {
+		m[k] = v
+	}
+	m[model] = p
+	t.prices = m
+}
+
+// UpdatePrice swaps the live table (atomic; in-flight requests keep their
+// request-start snapshot — only NEW requests see the new price).
+func UpdatePrice(model string, p ModelPrice) {
+	next := priceTable.Load()
+	next.Set(model, p)
+	priceTable.Store(next)
+}
+
+var priceTable = newAtomicTable()
+
+func newAtomicTable() atomicTable {
+	return atomicTable{ptr: atomic.Pointer[PriceTable]{}}
+}
+
+type atomicTable struct {
+	ptr atomic.Pointer[PriceTable]
+}
+
+func (a *atomicTable) Load() *PriceTable {
+	if p := a.ptr.Load(); p != nil {
+		return p
+	}
+	init := NewPriceTable()
+	if a.ptr.CompareAndSwap(nil, init) {
+		return init
+	}
+	return a.ptr.Load()
+}
+
+func (a *atomicTable) Store(t *PriceTable) { a.ptr.Store(t) }
 
 // CalculateAmount computes the charge in micro-units:
 //

@@ -25,6 +25,10 @@ import (
 // an error rejects the request.
 type ModelResolver func(model string, req *openai.ChatCompletionRequest) (string, error)
 
+// PriceSnapshotFunc returns the prices effective at request start, frozen
+// into the metering event so settlement never reprices in-flight requests.
+type PriceSnapshotFunc func(model string) (inputPer1M, outputPer1M int64, ok bool)
+
 // PreChargeFunc reserves funds for a request before upstream forwarding.
 // Returning an error rejects the request (e.g. insufficient balance).
 // This is the billing fast path; the async settle track releases the
@@ -55,6 +59,8 @@ type ChatCall struct {
 	// Provider is the winning channel ID (set by the routing upstream),
 	// recorded in the metering event.
 	Provider string
+	// Pricing is the request-start price freeze (settlement must use it).
+	Pricing *metering.PricingSnapshot
 }
 
 // ChatResult is the outcome of a non-streaming call.
@@ -69,10 +75,11 @@ type ChatResult struct {
 // Server hosts the OpenAI-compatible HTTP API.
 type Server struct {
 	upstream  Upstream
-	keys      map[string]bool // accepted API keys (M1: static; later: store)
-	sink      metering.Sink   // optional billing event sink (M2+)
-	preCharge PreChargeFunc   // optional billing fast path (M2+)
-	resolver  ModelResolver   // optional model resolution ("auto")
+	keys      map[string]bool   // accepted API keys (M1: static; later: store)
+	sink      metering.Sink     // optional billing event sink (M2+)
+	preCharge PreChargeFunc     // optional billing fast path (M2+)
+	resolver  ModelResolver     // optional model resolution ("auto")
+	priceSnap PriceSnapshotFunc // optional request-start price freeze
 	log       *slog.Logger
 	httpSrv   *http.Server
 	now       func() time.Time
@@ -90,6 +97,11 @@ func WithKeys(keys []string) Option {
 			s.keys[k] = true
 		}
 	}
+}
+
+// WithPriceSnapshot attaches the request-start price freeze.
+func WithPriceSnapshot(fn PriceSnapshotFunc) Option {
+	return func(s *Server) { s.priceSnap = fn }
 }
 
 // WithModelResolver attaches model resolution ("auto" support).

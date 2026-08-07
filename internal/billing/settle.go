@@ -217,6 +217,15 @@ func shardOf(sh *settleShard, shards []*settleShard) int {
 	return -1
 }
 
+// priceFromEvent returns the request-start price snapshot, falling back
+// to the current table for legacy events without a snapshot.
+func priceFromEvent(ev metering.Event) ModelPrice {
+	if ev.Pricing != nil {
+		return ModelPrice{InputPer1M: ev.Pricing.InputPer1M, OutputPer1M: ev.Pricing.OutputPer1M}
+	}
+	return PriceFor(ev.Model)
+}
+
 // orderFromEvent converts a metering event to a terminal order.
 // Failed requests (zero-completion insurance) become NO_CHARGE orders
 // with amount 0 — the user pays nothing for requests that never produced
@@ -224,7 +233,10 @@ func shardOf(sh *settleShard, shards []*settleShard) int {
 func orderFromEvent(ev metering.Event) *Order {
 	status := StatusSettled
 	completion := int64(ev.CompletionTokens)
-	amount := CalculateAmount(int64(ev.PromptTokens), completion, PriceFor(ev.Model))
+	// Price from the REQUEST-START snapshot (never the current table —
+	// in-flight requests must not be repriced by mid-request changes).
+	p := priceFromEvent(ev)
+	amount := CalculateAmount(int64(ev.PromptTokens), completion, p)
 	if ev.Status == metering.StatusFailed {
 		status = StatusNoCharge
 		completion = 0
