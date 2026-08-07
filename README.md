@@ -197,6 +197,7 @@ METERGATE_CONFIG=./configs/routing.example.yaml ./metergate
 
 ## Writing
 
+- **Problem log (12 issues, 2 money leaks, how each was found & fixed)**: [docs/PROBLEMS.md](docs/PROBLEMS.md)
 - **Blog — Billing precision under load**: [docs/blog/billing-precision.md](docs/blog/billing-precision.md)
   (why integer math, dual-track metering, and how a 213k-request audit
   caught two real money leaks)
