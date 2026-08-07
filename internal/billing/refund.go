@@ -55,3 +55,15 @@ type RefundStore interface {
 	// MarkExecuted transitions PENDING → EXECUTED (idempotent).
 	MarkExecuted(ctx context.Context, id int64) error
 }
+
+// Entry is one immutable money movement (order or refund) on replay,
+// used by LedgerAdapter.Replay.
+type Entry struct {
+	RequestID    string
+	UserID       string
+	Model        string
+	Status       string // SETTLED | NO_CHARGE
+	AmountMicros int64
+	Direction    string // ORDER | CREDIT | DEBIT
+	CreatedAt    time.Time
+}

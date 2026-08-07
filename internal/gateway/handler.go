@@ -39,6 +39,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model is required")
 		return
 	}
+	if s.resolver != nil {
+		resolved, err := s.resolver(req.Model, &req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "model resolution failed: "+err.Error())
+			return
+		}
+		req.Model = resolved
+	}
 
 	call := &ChatCall{
 		RequestID: s.requestID(),

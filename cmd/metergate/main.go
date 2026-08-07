@@ -52,9 +52,11 @@ import (
 	"github.com/differs/MeterGate/internal/admin"
 	"github.com/differs/MeterGate/internal/billing"
 	"github.com/differs/MeterGate/internal/gateway"
+	"github.com/differs/MeterGate/internal/ledger"
 	"github.com/differs/MeterGate/internal/metering"
 	"github.com/differs/MeterGate/internal/reconciliation"
 	"github.com/differs/MeterGate/internal/router"
+	"github.com/differs/MeterGate/pkg/openai"
 )
 
 func envOr(key, def string) string {
@@ -110,14 +112,15 @@ func main() {
 	}
 
 	if pgDSN != "" {
-		var err error
-		store, err = billing.NewPostgresOrderStore(ctx, pgDSN)
+		// LedgerAdapter boundary: PostgreSQL today, TigerBeetle later.
+		adapter, err := ledger.NewPostgresAdapter(ctx, pgDSN)
 		if err != nil {
 			logger.Error("postgres unavailable, billing disabled", "err", err)
 			store = nil
 		} else {
-			defer store.Close()
-			logger.Info("order storage enabled")
+			store = adapter.PostgresOrderStore
+			defer adapter.Close()
+			logger.Info("order storage enabled (ledger: postgres)")
 		}
 	}
 
@@ -135,10 +138,24 @@ func main() {
 
 	// --- M5: Kafka event bus + ClickHouse detail tier (optional) ---
 	var kafkaSink *billing.KafkaSink
+	var kafkaConsumer *billing.KafkaConsumer
 	if len(kafkaBrokers) > 0 {
 		kafkaSink = billing.NewKafkaSink(kafkaBrokers, "metering.events", logger)
 		defer kafkaSink.Close()
 		logger.Info("kafka event bus enabled", "brokers", len(kafkaBrokers))
+		// Kafka consumption mode: the Settler is driven by the consumer
+		// group instead of the in-process sink — durable, multi-instance
+		// safe. The in-process sink below is then not wired.
+		if store != nil {
+			settlerK := billing.NewSettler(store, precharger, logger, 500)
+			kafkaConsumer = billing.NewKafkaConsumer(kafkaBrokers, "metering.events", "metergate-settle", settlerK, logger, 4)
+			go func() {
+				if err := kafkaConsumer.Run(ctx); err != nil {
+					logger.Error("kafka consumer stopped", "err", err)
+				}
+			}()
+			logger.Info("kafka consumer mode enabled (settle via event bus)")
+		}
 	}
 	var detailSink *billing.DetailSink
 	if chAddr != "" {
@@ -185,11 +202,11 @@ func main() {
 			return precharger.PreCharge(ctx, userID, requestID, billing.EstimatePreCharge(promptTokens, maxTokens, p))
 		}))
 	}
-	// Sink chain: in-process settle sink + optional Kafka bus + optional
-	// ClickHouse detail tier. The gateway emits once; all sinks receive
-	// the same event (log sink is always on inside the gateway).
+	// Sink chain: in-process settle sink (only without Kafka consumer mode)
+	// + Kafka bus + ClickHouse detail tier. The gateway emits once; all
+	// sinks receive the same event (log sink is always on inside the gateway).
 	combo := &gateway.CompositeSink{Sinks: []metering.Sink{}}
-	if sink != nil {
+	if sink != nil && kafkaConsumer == nil {
 		combo.Sinks = append(combo.Sinks, sink)
 	}
 	if kafkaSink != nil {
@@ -215,8 +232,25 @@ func main() {
 			logger.Error("routing config invalid", "err", err)
 			os.Exit(1)
 		}
+		autoRouter, err := router.BuildAutoRouter(cfg, snap)
+		if err != nil {
+			logger.Error("routing config invalid (auto_router)", "err", err)
+			os.Exit(1)
+		}
 		r := router.NewRouter(snap)
+		if autoRouter != nil {
+			r = router.NewRouterWithAuto(snap, autoRouter)
+			logger.Info("auto router enabled", "models", len(cfg.AutoRouter.Models), "cost_quality", cfg.AutoRouter.CostQuality)
+		}
 		up = router.NewRoutingUpstream(r)
+		if autoRouter != nil {
+			opts = append(opts, gateway.WithModelResolver(func(model string, req *openai.ChatCompletionRequest) (string, error) {
+				if model == "auto" || model == "openrouter/auto" {
+					return autoRouter.Pick(req)
+				}
+				return model, nil
+			}))
+		}
 		logger.Info("routing engine enabled",
 			"channels", len(cfg.Channels),
 			"models", len(cfg.Models),

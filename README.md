@@ -39,7 +39,9 @@ All open-source LLM relays have the same two blind spots — **we measured them*
 - [x] **Batch-committed bill writes** — Settler buffers 500 orders / 50ms → single multi-row INSERT (fsync 15K/s → ~30/s) — **M5 done**
 - [x] **ClickHouse detail tier** — per-request `billing_detail` (180-day TTL, Layer A verified: PG orders == CH details, count and amount) — **M5 done**
 - [x] **Kafka event bus** — `metering.events` topic (hash-partitioned by request_id), async producer never blocks the gateway — **M5 done**
-- [ ] Pluggable ledger (`LedgerAdapter`: PostgreSQL first, TigerBeetle later)
+- [x] **Kafka consumer mode** — settle driven by the event bus (durable, multi-instance safe; replaces the in-process sink) — **done**
+- [x] **LedgerAdapter** — `internal/ledger`: order/refund/balance/replay boundary, PostgreSQL default, TigerBeetle swappable — **done**
+- [x] **Auto Router** — `openrouter/auto`-style model picking, pure local scoring (cost/quality dial 0-10, zero per-request latency) — **done**
 - [ ] In-memory routing snapshot (zero DB calls on hot path) — partial: immutable atomic snapshot swap in place
 - [ ] Batch-committed bill writes (500 rows/commit, fsync 15K/s → 30/s)
 - [ ] Three-layer reconciliation + auto-refund
@@ -101,6 +103,28 @@ PostgreSQL — terminal order rows keyed by `request_id`, safe to replay.
 - [x] **M3** Routing engine (price-weighted, 30s failure window, circuit breaker) — **done**
 - [x] **M4** Three-layer reconciliation + auto-refund + admin API — **done**
 - [x] **M5** ClickHouse detail tier + batch-commit pipeline + Kafka event bus — **done**
+- [x] **Extras** Kafka consumer mode, LedgerAdapter, Auto Router — **done**
+
+## Auto Router & LedgerAdapter (extras)
+
+```yaml
+# configs/routing.example.yaml
+auto_router:
+  cost_quality: 7      # 0 = always most capable, 10 = always cheapest
+  models: [deepseek-chat, gpt-4o-mini, gpt-4o]
+```
+
+```bash
+curl -d '{"model":"auto","messages":[{"role":"user","content":"hi"}]}' \
+     http://localhost:3000/v1/chat/completions
+```
+
+- **Auto Router**: pure local scoring (prompt length, reasoning hints,
+  tool calls) — zero external calls, <1ms per request. Simple prompts go
+  cheap, complex prompts go capable (verified end-to-end).
+- **LedgerAdapter** (`internal/ledger`): the money-store boundary —
+  orders/refunds/balance/replay. PostgreSQL is the default; a TigerBeetle
+  adapter implements the same interface when the scale demands it.
 
 ## Event bus & detail tier (M5)
 

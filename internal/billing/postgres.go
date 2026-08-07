@@ -227,6 +227,53 @@ func (s *PostgresOrderStore) NegativeAmountOrders(ctx context.Context, day strin
 	return out, rows.Err()
 }
 
+// Balance returns the net balance for a user: sum(orders) + executed
+// refunds (CREDIT +, DEBIT -). This is the authoritative, replayable
+// figure; the Redis balance is the realtime operational view.
+func (s *PostgresOrderStore) Balance(ctx context.Context, userID string) (int64, error) {
+	var net int64
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(amount_micros), 0) FROM orders WHERE user_id = $1`, userID).Scan(&net); err != nil {
+		return 0, err
+	}
+	var ref int64
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(CASE WHEN direction = 'CREDIT' THEN amount_micros
+		                         ELSE -amount_micros END), 0)
+		FROM refunds WHERE user_id = $1 AND status = 'EXECUTED'`, userID).Scan(&ref); err != nil {
+		return 0, err
+	}
+	return net + ref, nil
+}
+
+// Replay streams all entries (orders + refunds) in a time window.
+func (s *PostgresOrderStore) Replay(ctx context.Context, from, to time.Time, fn func(Entry) error) error {
+	rows, err := s.pool.Query(ctx, `
+		SELECT request_id, user_id, model, status, amount_micros, 'ORDER', created_at
+		FROM orders
+		WHERE created_at >= $1 AND created_at < $2
+		UNION ALL
+		SELECT request_id, user_id, '' AS model, status, amount_micros, direction, created_at
+		FROM refunds
+		WHERE created_at >= $1 AND created_at < $2
+		ORDER BY created_at`, from, to)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e Entry
+		if err := rows.Scan(&e.RequestID, &e.UserID, &e.Model, &e.Status,
+			&e.AmountMicros, &e.Direction, &e.CreatedAt); err != nil {
+			return err
+		}
+		if err := fn(e); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 // Close releases the pool.
 func (s *PostgresOrderStore) Close() { s.pool.Close() }
 

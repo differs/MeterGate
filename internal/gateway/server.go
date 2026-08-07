@@ -15,9 +15,15 @@ import (
 	"time"
 
 	"github.com/differs/MeterGate/internal/metering"
+	"github.com/differs/MeterGate/pkg/openai"
 )
 
 // ctxKeyUserID is defined in middleware.go.
+
+// ModelResolver maps the requested model to a concrete model before
+// routing (e.g. "auto" → a picked model from the auto router). Returning
+// an error rejects the request.
+type ModelResolver func(model string, req *openai.ChatCompletionRequest) (string, error)
 
 // PreChargeFunc reserves funds for a request before upstream forwarding.
 // Returning an error rejects the request (e.g. insufficient balance).
@@ -66,6 +72,7 @@ type Server struct {
 	keys      map[string]bool // accepted API keys (M1: static; later: store)
 	sink      metering.Sink   // optional billing event sink (M2+)
 	preCharge PreChargeFunc   // optional billing fast path (M2+)
+	resolver  ModelResolver   // optional model resolution ("auto")
 	log       *slog.Logger
 	httpSrv   *http.Server
 	now       func() time.Time
@@ -83,6 +90,11 @@ func WithKeys(keys []string) Option {
 			s.keys[k] = true
 		}
 	}
+}
+
+// WithModelResolver attaches model resolution ("auto" support).
+func WithModelResolver(fn ModelResolver) Option {
+	return func(s *Server) { s.resolver = fn }
 }
 
 // WithPreCharge attaches the billing fast path (atomic fund reservation).

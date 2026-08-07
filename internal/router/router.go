@@ -25,11 +25,15 @@ type Router struct {
 
 	health   *HealthTracker
 	breakers map[string]*Breaker
+	auto     AutoRouter // optional "auto" model picker
 }
 
 // NewRouter builds a router from a snapshot, wiring health trackers and
 // breakers for every channel.
-func NewRouter(snap *Snapshot) *Router {
+func NewRouter(snap *Snapshot) *Router { return NewRouterWithAuto(snap, nil) }
+
+// NewRouterWithAuto wires the router with an optional auto router.
+func NewRouterWithAuto(snap *Snapshot, auto AutoRouter) *Router {
 	r := &Router{
 		Engine:   *NewEngine(),
 		health:   NewHealthTracker(0, nil),
@@ -48,6 +52,9 @@ func NewRouter(snap *Snapshot) *Router {
 	r.snap.Store(snap)
 	return r
 }
+
+// Auto returns the auto router (nil when not configured).
+func (r *Router) Auto() AutoRouter { return r.auto }
 
 // Route returns the decision for a model from the current snapshot.
 // Health/breaker state is folded into the channel specs on the fly —
@@ -93,10 +100,20 @@ func (r *Router) ChannelHealth(channelID string) (healthy bool, breakerState str
 
 // --- config loading -------------------------------------------------------
 
-// Config is the M3 routing configuration file shape.
+// Config is the routing configuration file shape.
 type Config struct {
 	Channels []ChannelConfig `yaml:"channels"`
 	Models   []ModelConfig   `yaml:"models"`
+	// AutoRouter is optional: enables the "auto" model (local scoring).
+	AutoRouter *AutoRouterConfig `yaml:"auto_router"`
+}
+
+// AutoRouterConfig configures the local auto model picker.
+type AutoRouterConfig struct {
+	// CostQuality 0-10: 0 = always most capable, 10 = always cheapest.
+	CostQuality int `yaml:"cost_quality"`
+	// Models is the candidate pool (model slugs that must exist in `models`).
+	Models []string `yaml:"models"`
 }
 
 // ChannelConfig is one upstream channel in the config file.
@@ -175,4 +192,30 @@ func BuildSnapshot(cfg *Config) (*Snapshot, error) {
 	}
 
 	return &Snapshot{Version: 1, Models: models}, nil
+}
+
+// BuildAutoRouter builds the optional auto router from config.
+func BuildAutoRouter(cfg *Config, snap *Snapshot) (AutoRouter, error) {
+	if cfg.AutoRouter == nil || len(cfg.AutoRouter.Models) == 0 {
+		return nil, nil
+	}
+	pool := make([]AutoCandidate, 0, len(cfg.AutoRouter.Models))
+	for _, m := range cfg.AutoRouter.Models {
+		route, ok := snap.Models[m]
+		if !ok {
+			return nil, fmt.Errorf("config: auto_router model %q not defined in models", m)
+		}
+		// pool cost = cheapest channel cost of that model
+		var inp, out int64 = 1<<62 - 1, 1<<62 - 1
+		for _, c := range route.Channels {
+			if c.Channel.OutputPer1M < out {
+				out = c.Channel.OutputPer1M
+			}
+			if c.Channel.InputPer1M < inp {
+				inp = c.Channel.InputPer1M
+			}
+		}
+		pool = append(pool, AutoCandidate{Model: m, InputPer1M: inp, OutputPer1M: out})
+	}
+	return NewLocalAutoRouter(pool, cfg.AutoRouter.CostQuality), nil
 }
