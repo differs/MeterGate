@@ -31,6 +31,8 @@ All open-source LLM relays have the same two blind spots — **we measured them*
 - [x] **Dual-track billing** — Redis Lua atomic pre-charge (fast path, 402 on insufficient balance) + async settle into PostgreSQL (slow path, terminal-state orders, idempotent) — **M2 done**
 - [x] Reconcile CLI (`cmd/reconcile`): day summary by status, anomaly scan, frozen-balance sweep — **M2 done**
 - [x] **Routing engine** — multi-channel, inverse-square price weighting (~9:1 at 3x price gap, verified), 30s failure window, per-channel circuit breaker, automatic failover (4xx never retries) — **M3 done**
+- [x] **Reconciliation engine** — Layer A (order integrity) + Layer B (frozen leak) + Layer C (day close); auto-refunds for negative-amount orders (small = auto-executed, large = manual), idempotent re-runs — **M4 done**
+- [x] **Admin API** — balance / orders / refunds / reconcile trigger (Bearer key auth) — **M4 done**
 - [ ] Pluggable ledger (`LedgerAdapter`: PostgreSQL first, TigerBeetle later)
 - [ ] In-memory routing snapshot (zero DB calls on hot path) — partial: immutable atomic snapshot swap in place
 - [ ] Batch-committed bill writes (500 rows/commit, fsync 15K/s → 30/s)
@@ -91,8 +93,28 @@ PostgreSQL — terminal order rows keyed by `request_id`, safe to replay.
 - [x] **M1** Single-node gateway + streaming metering + request-level events — **done**
 - [x] **M2** Dual-track billing (Redis pre-charge + async settle into PostgreSQL) + reconcile CLI — **done**
 - [x] **M3** Routing engine (price-weighted, 30s failure window, circuit breaker) — **done**
-- [ ] **M4** Three-layer reconciliation + auto-refund + admin API
+- [x] **M4** Three-layer reconciliation + auto-refund + admin API — **done**
 - [ ] **M5** ClickHouse detail tier + batch commit pipeline
+
+## Reconciliation & Admin (M4)
+
+```bash
+# CLI
+./reconcile --pg-dsn postgres://... --redis 127.0.0.1:6379 --auto-refund
+
+# Admin API (enable with METERGATE_ADMIN_PORT / METERGATE_ADMIN_KEY)
+curl -H "Authorization: Bearer admin-secret" \
+     "http://localhost:3001/admin/balance?user=sk-xxx"
+curl -X POST -H "Authorization: Bearer admin-secret" \
+     -d '{"day":"2026-08-06","auto_refund":true}' \
+     http://localhost:3001/admin/reconcile
+```
+
+Reconciliation detects order anomalies (e.g. negative amounts from settle
+bugs) and issues refund entries: small amounts credit the Redis balance
+immediately, large amounts pend for manual approval. Every refund is
+idempotent (`idempotency_key`) — re-running reconcile never double-credits
+(verified end-to-end: -500µ order → +500µ credited → re-run = 0 refunds).
 
 ## Routing (M3)
 

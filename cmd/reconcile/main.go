@@ -17,21 +17,23 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 
 	"github.com/differs/MeterGate/internal/billing"
+	"github.com/differs/MeterGate/internal/reconciliation"
 )
 
 func main() {
 	var (
-		pgDSN     = flag.String("pg-dsn", "", "PostgreSQL DSN (required)")
-		redisAddr = flag.String("redis", "", "Redis address (for sweep)")
-		day       = flag.String("day", time.Now().AddDate(0, 0, -1).Format("2006-01-02"), "day to reconcile (YYYY-MM-DD, default yesterday)")
-		sweep     = flag.Bool("sweep", false, "report frozen (pre-charged) balance sweep")
-		verbose   = flag.Bool("v", false, "verbose output")
+		pgDSN      = flag.String("pg-dsn", "", "PostgreSQL DSN (required)")
+		redisAddr  = flag.String("redis", "", "Redis address (for frozen sweep)")
+		day        = flag.String("day", time.Now().AddDate(0, 0, -1).Format("2006-01-02"), "day to reconcile (YYYY-MM-DD, default yesterday)")
+		autoRefund = flag.Bool("auto-refund", false, "issue refunds for detected differences (small amounts auto-executed)")
+		verbose    = flag.Bool("v", false, "verbose output")
 	)
 	flag.Parse()
 	ctx := context.Background()
@@ -49,59 +51,44 @@ func main() {
 	}
 	defer store.Close()
 
+	var pre *billing.Precharger
+	if *redisAddr != "" {
+		rdb := redis.NewClient(&redis.Options{Addr: *redisAddr})
+		if err := rdb.Ping(ctx).Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: redis unreachable: %v\n", err)
+		} else {
+			pre = billing.NewPrecharger(rdb)
+		}
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	recon := reconciliation.New(store, store, pre, logger)
+	rep, err := recon.RunDay(ctx, *day, *autoRefund)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: reconcile: %v\n", err)
+		os.Exit(2)
+	}
 	dirty := false
-
-	// 1) Day summary by status.
-	summary, err := store.Summary(ctx, *day)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: summary: %v\n", err)
-		os.Exit(2)
-	}
-	fmt.Printf("=== MeterGate reconcile %s ===\n", *day)
-	if len(summary) == 0 {
-		fmt.Println("  (no orders recorded for this day)")
-	}
-	for _, st := range []string{billing.StatusSettled, billing.StatusNoCharge} {
-		if s, ok := summary[st]; ok {
-			fmt.Printf("  %-10s count=%-10d tokens=%-15d amount_micros=%d\n",
-				st, s.Count, s.TotalTokens, s.AmountMicros)
-		}
-	}
-
-	// 2) Anomaly scan (cheap guards; full cross-checks land in M4).
-	anomalies, err := store.Anomalies(ctx, *day)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: anomaly scan: %v\n", err)
-		os.Exit(2)
-	}
-	if len(anomalies) > 0 {
+	fmt.Printf("=== MeterGate reconcile %s ===\n", rep.Day)
+	fmt.Printf("  SETTLED    count=%-10d\n", rep.SettledCount)
+	fmt.Printf("  NO_CHARGE  count=%-10d\n", rep.NoChargeCnt)
+	fmt.Printf("  total amount_micros=%d\n", rep.TotalAmount)
+	if rep.Anomalies > 0 {
 		dirty = true
-		fmt.Printf("  ✗ %d anomaly rows:\n", len(anomalies))
-		for _, a := range anomalies {
-			fmt.Printf("    - %s\n", a)
-		}
+		fmt.Printf("  ✗ %d anomaly rows (see log)\n", rep.Anomalies)
 	} else {
 		fmt.Println("  ✓ no anomalies")
 	}
-
-	// 3) Frozen balance sweep (optional, needs Redis).
-	if *sweep && *redisAddr != "" {
-		rdb := redis.NewClient(&redis.Options{Addr: *redisAddr})
-		if err := rdb.Ping(ctx).Err(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: redis unreachable, skip sweep: %v\n", err)
-		} else {
-			pre := billing.NewPrecharger(rdb)
-			frozen, err := pre.FrozenBalance(ctx)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: sweep: %v\n", err)
-				os.Exit(2)
-			}
-			if frozen > 0 {
-				dirty = true
-				fmt.Printf("  ✗ frozen (unsettled pre-charge) balance: %d micros — check for leaked pre-charges\n", frozen)
-			} else {
-				fmt.Println("  ✓ no frozen balance")
-			}
+	if rep.FrozenLeaked > 0 {
+		dirty = true
+		fmt.Printf("  ✗ frozen (unsettled pre-charge) balance: %d micros\n", rep.FrozenLeaked)
+	} else {
+		fmt.Println("  ✓ no frozen balance")
+	}
+	if *autoRefund {
+		fmt.Printf("  refunds: %d auto-executed, %d manual-pending\n", rep.RefundsAuto, rep.RefundsManual)
+		if rep.RefundsAuto > 0 {
+			dirty = true
 		}
 	}
 

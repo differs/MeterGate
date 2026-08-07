@@ -40,3 +40,25 @@ CREATE TABLE IF NOT EXISTS account_ledger (
 
 CREATE INDEX IF NOT EXISTS idx_ledger_account
     ON account_ledger (account_id, window_start);
+
+-- refunds: independent adjustment entries. Never mutate the original
+-- order row; reconciliation sums orders + refunds for the net position.
+CREATE TABLE IF NOT EXISTS refunds (
+    id               BIGSERIAL PRIMARY KEY,
+    request_id       TEXT NOT NULL DEFAULT '',
+    user_id          TEXT NOT NULL,
+    order_id         TEXT NOT NULL DEFAULT '',
+    reason_code      TEXT NOT NULL,
+    amount_micros    BIGINT NOT NULL,
+    direction        TEXT NOT NULL DEFAULT 'CREDIT',  -- CREDIT | DEBIT
+    status           TEXT NOT NULL DEFAULT 'PENDING', -- PENDING | APPROVED | EXECUTED | REJECTED
+    approval_level   TEXT NOT NULL DEFAULT 'AUTO',    -- AUTO | MANUAL
+    idempotency_key  TEXT UNIQUE NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_refunds_user
+    ON refunds (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_refunds_status
+    ON refunds (status, created_at);

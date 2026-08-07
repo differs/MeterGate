@@ -19,6 +19,11 @@
 //	METERGATE_CONFIG        routing config YAML (multi-channel, price-weighted,
 //	                        30s failure window, circuit breaker)
 //
+// Admin API (optional):
+//
+//	METERGATE_ADMIN_PORT   admin HTTP port (disabled when empty)
+//	METERGATE_ADMIN_KEY    admin API key (required with the port)
+//
 // Example (full stack):
 //
 //	METERGATE_UPSTREAM=http://127.0.0.1:9901/v1/chat/completions \
@@ -31,6 +36,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -38,8 +44,10 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/differs/MeterGate/internal/admin"
 	"github.com/differs/MeterGate/internal/billing"
 	"github.com/differs/MeterGate/internal/gateway"
+	"github.com/differs/MeterGate/internal/reconciliation"
 	"github.com/differs/MeterGate/internal/router"
 )
 
@@ -60,6 +68,8 @@ func main() {
 	configPath := envOr("METERGATE_CONFIG", "")
 	redisAddr := envOr("METERGATE_REDIS_ADDR", "")
 	pgDSN := envOr("METERGATE_PG_DSN", "")
+	adminPort := envOr("METERGATE_ADMIN_PORT", "")
+	adminKey := envOr("METERGATE_ADMIN_KEY", "")
 
 	apiKeys := splitKeys(os.Getenv("METERGATE_API_KEYS"))
 	if upstreamURL == "" && configPath == "" {
@@ -113,6 +123,27 @@ func main() {
 		sink = billing.NewSink(ctx, settler, logger, 10_000)
 		defer sink.Close()
 		logger.Info("billing enabled (settle only, no pre-charge)")
+	}
+
+	// --- admin API (optional) ---
+	if adminPort != "" && store != nil {
+		if adminKey == "" {
+			logger.Error("METERGATE_ADMIN_KEY required with METERGATE_ADMIN_PORT")
+			os.Exit(1)
+		}
+		recon := reconciliation.New(store, store, precharger, logger)
+		adm := admin.New(store, store, precharger, recon, adminKey)
+		adminSrv := &http.Server{
+			Addr:    ":" + adminPort,
+			Handler: adm.Handler(),
+		}
+		go func() {
+			logger.Info("admin API listening", "addr", adminSrv.Addr)
+			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("admin server failed", "err", err)
+			}
+		}()
+		defer adminSrv.Shutdown(context.Background())
 	}
 
 	// --- gateway ---

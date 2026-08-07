@@ -45,6 +45,10 @@ type OrderStore interface {
 	InsertOrder(ctx context.Context, o Order) (inserted bool, err error)
 	// Summary returns per-status aggregates for the given day (reconcile).
 	Summary(ctx context.Context, day string) (map[string]DaySummary, error)
+	// Anomalies returns human-readable anomaly descriptions for a day.
+	Anomalies(ctx context.Context, day string) ([]string, error)
+	// NegativeAmountOrders returns orders with amount < 0 (refundable).
+	NegativeAmountOrders(ctx context.Context, day string) ([]Order, error)
 }
 
 // DaySummary aggregates one order status for one day.

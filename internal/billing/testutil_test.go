@@ -28,6 +28,22 @@ func (m *memStore) InsertOrder(_ context.Context, o Order) (bool, error) {
 	return true, nil
 }
 
+func (m *memStore) Anomalies(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *memStore) NegativeAmountOrders(_ context.Context, _ string) ([]Order, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Order
+	for _, o := range m.orders {
+		if o.AmountMicros < 0 {
+			out = append(out, o)
+		}
+	}
+	return out, nil
+}
+
 func (m *memStore) Summary(_ context.Context, _ string) (map[string]DaySummary, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
