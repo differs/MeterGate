@@ -1,0 +1,131 @@
+# MeterGate gateway Deployment — stateless, horizontally scalable.
+# Each replica runs: data plane + Kafka producer + Kafka consumer member
+# (same consumer group → automatic partition load balancing).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metergate
+  labels:
+    app: metergate
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: metergate
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: metergate
+    spec:
+      terminationGracePeriodSeconds: 120  # drain in-flight SSE streams
+      containers:
+        - name: metergate
+          image: ghcr.io/differs/metergate:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: METERGATE_PORT
+              value: "3000"
+            - name: METERGATE_UPSTREAM
+              value: "http://llm-upstream-svc:9901/v1/chat/completions"
+            - name: METERGATE_UPSTREAM_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: metergate-secrets
+                  key: upstream-key
+            - name: METERGATE_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: metergate-secrets
+                  key: api-keys
+            - name: METERGATE_REDIS_ADDR
+              value: "redis-cluster:6379"
+            - name: METERGATE_PG_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: metergate-secrets
+                  key: pg-dsn
+            - name: METERGATE_KAFKA
+              value: "kafka-0.kafka:9092,kafka-1.kafka:9092,kafka-2.kafka:9092"
+            - name: METERGATE_CLICKHOUSE
+              value: "clickhouse:9000"
+            - name: METERGATE_LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 4Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+---
+# Service — ClusterIP (NLB/Ingress terminates external traffic)
+apiVersion: v1
+kind: Service
+metadata:
+  name: metergate
+spec:
+  selector:
+    app: metergate
+  ports:
+    - port: 3000
+      targetPort: http
+      name: http
+---
+# HPA — scale by CPU (每核 ~6K req/s) and memory headroom
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: metergate
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: metergate
+  minReplicas: 1
+  maxReplicas: 64
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300   # avoid flapping during load dips
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 30    # fast reaction to load spikes

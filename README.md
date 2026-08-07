@@ -205,6 +205,17 @@ METERGATE_CONFIG=./configs/routing.example.yaml ./metergate
 - **Show HN**: [docs/posts/show-hn.md](docs/posts/show-hn.md)
 - **Chinese community post**: [docs/posts/chinese-community.md](docs/posts/chinese-community.md)
 
+## Horizontal scaling
+
+Verified (1/2/4 instances, per-core efficiency constant) and documented:
+[docs/scaling-deployment.md](docs/scaling-deployment.md) — topology,
+component sizing (Kafka partitions, PG shards, Redis cluster), step-by-step
+expansion (1 → 4 → 16 instances), K8s manifests
+([deploy/k8s/gateway.yaml](deploy/k8s/gateway.yaml)), Kafka sizing
+([deploy/kafka-sizing.md](deploy/kafka-sizing.md)), PG sharding
+([deploy/pg-sharding.md](deploy/pg-sharding.md)) and a post-expansion
+verification checklist.
+
 ## License
 
 MIT
