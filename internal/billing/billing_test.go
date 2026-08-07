@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -115,6 +116,7 @@ func TestSettleIdempotent(t *testing.T) {
 	if err := settler.Handle(ctx, ev); err != nil {
 		t.Fatal(err)
 	}
+	settler.Close() // flushes the batch synchronously
 	if len(store.orders) != 1 {
 		t.Fatalf("orders = %d, want 1 (idempotent)", len(store.orders))
 	}
@@ -124,5 +126,20 @@ func TestSettleIdempotent(t *testing.T) {
 	}
 	if o.AmountMicros != CalculateAmount(10, 20, PriceFor("gpt-4o")) {
 		t.Fatalf("amount = %d", o.AmountMicros)
+	}
+}
+
+func TestSettleBatch(t *testing.T) {
+	store := &memStore{}
+	settler := NewSettler(store, nil, testLogger(), 10) // batch size 10
+	ctx := context.Background()
+	for i := 0; i < 25; i++ {
+		if err := settler.Handle(ctx, testEvent(fmt.Sprintf("req-%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settler.Close()
+	if len(store.orders) != 25 {
+		t.Fatalf("orders = %d, want 25 (batched commits)", len(store.orders))
 	}
 }

@@ -144,6 +144,35 @@ func (s *PostgresOrderStore) MarkExecuted(ctx context.Context, id int64) error {
 	return err
 }
 
+// InsertOrders implements OrderStore: multi-row INSERT in a single
+// statement (one commit). Batch sizes are bounded by the caller (Settler).
+func (s *PostgresOrderStore) InsertOrders(ctx context.Context, orders []Order) error {
+	if len(orders) == 0 {
+		return nil
+	}
+	b := &pgx.Batch{}
+	for _, o := range orders {
+		b.Queue(`
+			INSERT INTO orders
+				(request_id, user_id, model, provider, status,
+				 prompt_tokens, completion_tokens, total_tokens,
+				 amount_micros, duration_ms, ttft_ms, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			ON CONFLICT (request_id) DO NOTHING`,
+			o.RequestID, o.UserID, o.Model, o.Provider, o.Status,
+			o.PromptTokens, o.CompletionTokens, o.TotalTokens,
+			o.AmountMicros, o.DurationMs, o.TTFTMs, time.Now())
+	}
+	br := s.pool.SendBatch(ctx, b)
+	defer br.Close()
+	for range orders {
+		if _, err := br.Exec(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Anomalies returns human-readable anomaly descriptions for a day:
 // negative amounts, empty request IDs, non-terminal statuses.
 func (s *PostgresOrderStore) Anomalies(ctx context.Context, day string) ([]string, error) {

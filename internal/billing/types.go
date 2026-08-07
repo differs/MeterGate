@@ -43,6 +43,9 @@ type Order struct {
 type OrderStore interface {
 	// InsertOrder is idempotent: a duplicate request_id is a no-op.
 	InsertOrder(ctx context.Context, o Order) (inserted bool, err error)
+	// InsertOrders batch-inserts terminal orders (M5: multi-row INSERT,
+	// one commit per batch). Duplicates are skipped at the statement level.
+	InsertOrders(ctx context.Context, orders []Order) error
 	// Summary returns per-status aggregates for the given day (reconcile).
 	Summary(ctx context.Context, day string) (map[string]DaySummary, error)
 	// Anomalies returns human-readable anomaly descriptions for a day.

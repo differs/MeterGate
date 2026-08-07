@@ -15,6 +15,15 @@ type memStore struct {
 	orders []Order
 }
 
+func (m *memStore) InsertOrders(_ context.Context, orders []Order) error {
+	for _, o := range orders {
+		if _, err := m.InsertOrder(context.Background(), o); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *memStore) InsertOrder(_ context.Context, o Order) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

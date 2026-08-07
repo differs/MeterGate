@@ -33,6 +33,9 @@ All open-source LLM relays have the same two blind spots — **we measured them*
 - [x] **Routing engine** — multi-channel, inverse-square price weighting (~9:1 at 3x price gap, verified), 30s failure window, per-channel circuit breaker, automatic failover (4xx never retries) — **M3 done**
 - [x] **Reconciliation engine** — Layer A (order integrity) + Layer B (frozen leak) + Layer C (day close); auto-refunds for negative-amount orders (small = auto-executed, large = manual), idempotent re-runs — **M4 done**
 - [x] **Admin API** — balance / orders / refunds / reconcile trigger (Bearer key auth) — **M4 done**
+- [x] **Batch-committed bill writes** — Settler buffers 500 orders / 50ms → single multi-row INSERT (fsync 15K/s → ~30/s) — **M5 done**
+- [x] **ClickHouse detail tier** — per-request `billing_detail` (180-day TTL, Layer A verified: PG orders == CH details, count and amount) — **M5 done**
+- [x] **Kafka event bus** — `metering.events` topic (hash-partitioned by request_id), async producer never blocks the gateway — **M5 done**
 - [ ] Pluggable ledger (`LedgerAdapter`: PostgreSQL first, TigerBeetle later)
 - [ ] In-memory routing snapshot (zero DB calls on hot path) — partial: immutable atomic snapshot swap in place
 - [ ] Batch-committed bill writes (500 rows/commit, fsync 15K/s → 30/s)
@@ -45,11 +48,11 @@ client ──▶ Gateway (stateless, Go)
              │  fast path: Redis Lua pre-charge (atomic, no oversell)
              │  hot path:  stream + local token metering
              ▼
-           metering events (request-level, buffered sink — gateway never
-             │  blocks on billing)
+           metering events ──┬─▶ Kafka `metering.events` (event bus, M5)
+                             └─▶ ClickHouse `billing_detail` (audit, TTL 180d)
              ▼
-           Settler ──▶ PostgreSQL orders (terminal state, idempotent,
-                        append-only) ──▶ reconcile CLI (daily check + sweep)
+           Settler (batch 500/50ms) ──▶ PostgreSQL orders (terminal state,
+                                        idempotent) ──▶ reconcile CLI
 ```
 
 ## Quick Start
@@ -94,7 +97,22 @@ PostgreSQL — terminal order rows keyed by `request_id`, safe to replay.
 - [x] **M2** Dual-track billing (Redis pre-charge + async settle into PostgreSQL) + reconcile CLI — **done**
 - [x] **M3** Routing engine (price-weighted, 30s failure window, circuit breaker) — **done**
 - [x] **M4** Three-layer reconciliation + auto-refund + admin API — **done**
-- [ ] **M5** ClickHouse detail tier + batch commit pipeline
+- [x] **M5** ClickHouse detail tier + batch-commit pipeline + Kafka event bus — **done**
+
+## Event bus & detail tier (M5)
+
+```bash
+METERGATE_KAFKA=127.0.0.1:9092 METERGATE_CLICKHOUSE=127.0.0.1:9000 ./metergate
+```
+
+- Metering events fan out to Kafka (hash-partitioned by `request_id` for
+  per-request ordering) and ClickHouse (per-request detail rows, 180-day
+  TTL) without blocking the gateway hot path — async producers, delivery
+  errors logged (audit log is the recovery source).
+- Settler batches 500 orders / 50ms into a single multi-row INSERT
+  (one commit per batch instead of one per request).
+- **Layer A verified end-to-end**: PG orders and ClickHouse details agree
+  on count and amount (30 reqs → 30/30 rows, 3450/3450 micros).
 
 ## Reconciliation & Admin (M4)
 

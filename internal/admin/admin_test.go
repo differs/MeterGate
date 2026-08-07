@@ -22,6 +22,15 @@ type fakeStore struct {
 	refunds []billing.Refund
 }
 
+func (f *fakeStore) InsertOrders(_ context.Context, orders []billing.Order) error {
+	for _, o := range orders {
+		if _, err := f.InsertOrder(context.Background(), o); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (f *fakeStore) InsertOrder(_ context.Context, o billing.Order) (bool, error) {
 	for _, ex := range f.orders {
 		if ex.RequestID == o.RequestID {

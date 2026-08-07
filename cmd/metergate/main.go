@@ -24,6 +24,11 @@
 //	METERGATE_ADMIN_PORT   admin HTTP port (disabled when empty)
 //	METERGATE_ADMIN_KEY    admin API key (required with the port)
 //
+// Event bus + detail tier (M5, optional — falls back to in-process sinks):
+//
+//	METERGATE_KAFKA        comma-separated Kafka brokers (event bus)
+//	METERGATE_CLICKHOUSE   ClickHouse address, e.g. 127.0.0.1:9000 (detail tier)
+//
 // Example (full stack):
 //
 //	METERGATE_UPSTREAM=http://127.0.0.1:9901/v1/chat/completions \
@@ -47,6 +52,7 @@ import (
 	"github.com/differs/MeterGate/internal/admin"
 	"github.com/differs/MeterGate/internal/billing"
 	"github.com/differs/MeterGate/internal/gateway"
+	"github.com/differs/MeterGate/internal/metering"
 	"github.com/differs/MeterGate/internal/reconciliation"
 	"github.com/differs/MeterGate/internal/router"
 )
@@ -70,6 +76,8 @@ func main() {
 	pgDSN := envOr("METERGATE_PG_DSN", "")
 	adminPort := envOr("METERGATE_ADMIN_PORT", "")
 	adminKey := envOr("METERGATE_ADMIN_KEY", "")
+	kafkaBrokers := splitKeys(envOr("METERGATE_KAFKA", ""))
+	chAddr := envOr("METERGATE_CLICKHOUSE", "")
 
 	apiKeys := splitKeys(os.Getenv("METERGATE_API_KEYS"))
 	if upstreamURL == "" && configPath == "" {
@@ -114,15 +122,35 @@ func main() {
 	}
 
 	if precharger != nil && store != nil {
-		settler := billing.NewSettler(store, precharger, logger, 100)
+		settler := billing.NewSettler(store, precharger, logger, 500)
 		sink = billing.NewSink(ctx, settler, logger, 10_000)
 		defer sink.Close()
-		logger.Info("dual-track billing enabled (pre-charge + async settle)")
+		logger.Info("dual-track billing enabled (pre-charge + batched settle)")
 	} else if store != nil {
-		settler := billing.NewSettler(store, nil, logger, 100)
+		settler := billing.NewSettler(store, nil, logger, 500)
 		sink = billing.NewSink(ctx, settler, logger, 10_000)
 		defer sink.Close()
-		logger.Info("billing enabled (settle only, no pre-charge)")
+		logger.Info("billing enabled (batched settle only, no pre-charge)")
+	}
+
+	// --- M5: Kafka event bus + ClickHouse detail tier (optional) ---
+	var kafkaSink *billing.KafkaSink
+	if len(kafkaBrokers) > 0 {
+		kafkaSink = billing.NewKafkaSink(kafkaBrokers, "metering.events", logger)
+		defer kafkaSink.Close()
+		logger.Info("kafka event bus enabled", "brokers", len(kafkaBrokers))
+	}
+	var detailSink *billing.DetailSink
+	if chAddr != "" {
+		var err error
+		detailSink, err = billing.NewDetailSink(ctx, chAddr, logger, 1000)
+		if err != nil {
+			logger.Error("clickhouse unavailable, detail tier disabled", "err", err)
+			detailSink = nil
+		} else {
+			defer detailSink.Close()
+			logger.Info("clickhouse detail tier enabled", "addr", chAddr)
+		}
 	}
 
 	// --- admin API (optional) ---
@@ -157,8 +185,21 @@ func main() {
 			return precharger.PreCharge(ctx, userID, requestID, billing.EstimatePreCharge(promptTokens, maxTokens, p))
 		}))
 	}
+	// Sink chain: in-process settle sink + optional Kafka bus + optional
+	// ClickHouse detail tier. The gateway emits once; all sinks receive
+	// the same event (log sink is always on inside the gateway).
+	combo := &gateway.CompositeSink{Sinks: []metering.Sink{}}
 	if sink != nil {
-		opts = append(opts, gateway.WithMeteringSink(sink))
+		combo.Sinks = append(combo.Sinks, sink)
+	}
+	if kafkaSink != nil {
+		combo.Sinks = append(combo.Sinks, kafkaSink)
+	}
+	if detailSink != nil {
+		combo.Sinks = append(combo.Sinks, detailSink)
+	}
+	if len(combo.Sinks) > 0 {
+		opts = append(opts, gateway.WithMeteringSink(combo))
 	}
 
 	// --- upstream: routing engine (M3) or single upstream ---
