@@ -192,7 +192,7 @@ func main() {
 			logger.Error("METERGATE_ADMIN_KEY required with METERGATE_ADMIN_PORT")
 			os.Exit(1)
 		}
-		recon := reconciliation.New(store, store, precharger, logger)
+		recon := reconciliation.New(store, store, precharger, logger).WithMetrics(metrics)
 		adm := admin.New(store, store, precharger, recon, adminKey)
 		adminSrv := &http.Server{
 			Addr:    ":" + adminPort,
@@ -281,6 +281,31 @@ func main() {
 	} else {
 		up = gateway.NewHTTPUpstream(upstreamURL, upstreamKey)
 	}
+	// --- periodic gauge collectors (observability) ---
+	collector := obs.NewCollector(metrics, logger)
+	if precharger != nil {
+		collector.WithFrozen(func() (int64, error) {
+			return precharger.FrozenBalance(ctx)
+		})
+	}
+	if kafkaConsumer != nil {
+		collector.WithKafkaLag(func() (int64, error) {
+			return kafkaConsumer.Lag(), nil
+		})
+	}
+	if r, ok := up.(*router.RoutingUpstream); ok {
+		collector.WithChannels(func() []obs.ChannelState {
+			rr := r.Router()
+			out := make([]obs.ChannelState, 0, 8)
+			for _, id := range rr.Channels() {
+				healthy, state := rr.ChannelHealth(id)
+				out = append(out, obs.ChannelState{ID: id, Healthy: healthy, BreakerState: state})
+			}
+			return out
+		})
+	}
+	go collector.Run(ctx)
+
 	srv := gateway.NewServer(up, opts...)
 
 	logger.Info("metergate starting",

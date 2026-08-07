@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/differs/MeterGate/internal/billing"
+	"github.com/differs/MeterGate/internal/obs"
 )
 
 // Report summarizes one reconciliation run.
@@ -46,6 +47,7 @@ type Reconciler struct {
 	refunds billing.RefundStore
 	pre     *billing.Precharger // may be nil (no Redis)
 	log     *slog.Logger
+	metrics *obs.Metrics // optional
 	// AutoThresholdMicros: refunds at or below this amount execute
 	// automatically; above → MANUAL approval.
 	AutoThresholdMicros int64
@@ -60,6 +62,13 @@ func New(orders billing.OrderStore, refunds billing.RefundStore, pre *billing.Pr
 		log:                 log,
 		AutoThresholdMicros: 100_000_000, // 100 units of base currency
 	}
+}
+
+// WithMetrics attaches Prometheus instrumentation (recon diff counts +
+// within-tolerance flag feed the SLO alert).
+func (r *Reconciler) WithMetrics(m *obs.Metrics) *Reconciler {
+	r.metrics = m
+	return r
 }
 
 // RunDay executes Layer A + B + C for one day and returns the report.
@@ -111,6 +120,15 @@ func (r *Reconciler) RunDay(ctx context.Context, day string, autoRefund bool) (*
 		if err := r.autoRefundNegativeAmounts(ctx, day, rep); err != nil {
 			return nil, err
 		}
+	}
+
+	if r.metrics != nil {
+		r.metrics.ReconDiffTotal.WithLabelValues("internal").Add(float64(rep.Anomalies))
+		within := 0.0
+		if rep.Anomalies == 0 {
+			within = 1
+		}
+		r.metrics.ReconWithinTolerance.Set(within)
 	}
 	return rep, nil
 }

@@ -68,6 +68,11 @@ func NewKafkaConsumer(brokers []string, topic, groupID string, settler *Settler,
 	}
 }
 
+// Lag returns the total consumer lag (observability; 0 when idle/drained).
+func (c *KafkaConsumer) Lag() int64 {
+	return c.reader.Stats().Lag
+}
+
 // Run blocks until ctx is cancelled, consuming events continuously.
 func (c *KafkaConsumer) Run(ctx context.Context) error {
 	defer close(c.done)

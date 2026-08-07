@@ -23,6 +23,11 @@ type RoutingUpstream struct {
 	clients map[string]*gateway.HTTPUpstream
 }
 
+// Router exposes the underlying router (observability collectors).
+func (u *RoutingUpstream) Router() *Router {
+	return u.router
+}
+
 // NewRoutingUpstream builds the multi-channel upstream.
 // HTTPUpstream instances are shared per channel (connection reuse).
 func NewRoutingUpstream(r *Router) *RoutingUpstream {
