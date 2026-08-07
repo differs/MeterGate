@@ -23,16 +23,74 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"os"
 	"time"
 )
 
 const (
-	issuer      = "http://127.0.0.1:5557"
-	clientID    = "metergate"
-	clientSec   = "mock-secret"
-	redirectURI = "http://localhost:3002/api/oidc/callback"
-	keyID       = "mock-rsa-1"
+	defaultIssuer = "http://127.0.0.1:5557"
+	keyID         = "mock-rsa-1"
 )
+
+// Config is the mock OIDC provider configuration (config.json).
+type Config struct {
+	Issuer  string `json:"issuer"`
+	Clients []struct {
+		ID           string   `json:"id"`
+		Secret       string   `json:"secret"`
+		RedirectURIs []string `json:"redirect_uris"`
+	} `json:"clients"`
+	Users []struct {
+		Subject string `json:"subject"`
+		Email   string `json:"email"`
+	} `json:"users"`
+}
+
+var cfg Config
+
+func loadConfig() {
+	data, err := os.ReadFile("config.json")
+	if err != nil {
+		// built-in defaults (single client, single user)
+		cfg = Config{
+			Issuer: defaultIssuer,
+			Clients: []struct {
+				ID           string   `json:"id"`
+				Secret       string   `json:"secret"`
+				RedirectURIs []string `json:"redirect_uris"`
+			}{{ID: "metergate", Secret: "mock-secret", RedirectURIs: []string{
+				"http://localhost:3002/api/oidc/callback",
+				"http://localhost:3202/api/oidc/callback",
+			}}},
+			Users: []struct {
+				Subject string `json:"subject"`
+				Email   string `json:"email"`
+			}{{Subject: "oidc-user-alice", Email: "alice@metergate.dev"}},
+		}
+		return
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		log.Fatalf("bad config.json: %v", err)
+	}
+	if cfg.Issuer == "" {
+		cfg.Issuer = defaultIssuer
+	}
+	if len(cfg.Users) == 0 {
+		cfg.Users = []struct {
+			Subject string `json:"subject"`
+			Email   string `json:"email"`
+		}{{Subject: "oidc-user-alice", Email: "alice@metergate.dev"}}
+	}
+}
+
+func findClient(id string) (secret string, redirects []string, ok bool) {
+	for _, c := range cfg.Clients {
+		if c.ID == id {
+			return c.Secret, c.RedirectURIs, true
+		}
+	}
+	return "", nil, false
+}
 
 // RS256 signing key (standard IdP path — go-oidc verifies against JWKS).
 var rsaKey *rsa.PrivateKey
@@ -66,10 +124,10 @@ func signJWT(claims map[string]any) string {
 func discovery(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"issuer":                                issuer,
-		"authorization_endpoint":                issuer + "/authorize",
-		"token_endpoint":                        issuer + "/token",
-		"jwks_uri":                              issuer + "/keys",
+		"issuer":                                cfg.Issuer,
+		"authorization_endpoint":                cfg.Issuer + "/authorize",
+		"token_endpoint":                        cfg.Issuer + "/token",
+		"jwks_uri":                              cfg.Issuer + "/keys",
 		"response_types_supported":              []string{"code"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
@@ -81,17 +139,32 @@ func discovery(w http.ResponseWriter, _ *http.Request) {
 func authorize(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	q := r.URL.Query()
-	if q.Get("client_id") != clientID {
+	_, redirects, ok := findClient(q.Get("client_id"))
+	if !ok {
 		http.Error(w, "bad client_id", http.StatusBadRequest)
 		return
 	}
 	redirect := q.Get("redirect_uri")
-	if redirect != "http://localhost:3002/api/oidc/callback" &&
-		redirect != "http://localhost:3202/api/oidc/callback" {
+	valid := false
+	for _, ruri := range redirects {
+		if ruri == redirect {
+			valid = true
+			break
+		}
+	}
+	if !valid {
 		http.Error(w, "bad redirect_uri", http.StatusBadRequest)
 		return
 	}
-	subject := "oidc-user-alice"
+	// pick user: ?user=<email> selects from the pool, default first
+	subject := cfg.Users[0].Subject
+	email := q.Get("user")
+	for _, u := range cfg.Users {
+		if u.Email == email || u.Subject == email {
+			subject = u.Subject
+			break
+		}
+	}
 	code := fmt.Sprintf("code-%d", time.Now().UnixNano())
 	codes[code] = subject
 	loc := redirect + "?code=" + code + "&state=" + q.Get("state")
@@ -104,14 +177,14 @@ func token(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	// client auth: Basic OR body params (oauth2 defaults to body params
-	// when the discovery doc does not declare a token auth method)
+	// client auth: Basic OR body params
 	u, p, ok := r.BasicAuth()
 	if !ok {
 		u = r.Form.Get("client_id")
 		p = r.Form.Get("client_secret")
 	}
-	if u != clientID || p != clientSec {
+	secret, _, found := findClient(u)
+	if !found || p != secret {
 		http.Error(w, "bad client auth", http.StatusUnauthorized)
 		return
 	}
@@ -123,13 +196,20 @@ func token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// code reuse allowed in this mock (production IdPs reject reuse)
+	// resolve the subject's email from the user pool
+	email := "user@" + cfg.Issuer
+	for _, usr := range cfg.Users {
+		if usr.Subject == subject {
+			email = usr.Email
+			break
+		}
+	}
 	now := time.Now().Unix()
 	idToken := signJWT(map[string]any{
-		"iss": issuer, "sub": subject, "aud": clientID,
+		"iss": cfg.Issuer, "sub": subject, "aud": u,
 		"exp": now + 3600, "iat": now,
-		"email": "alice@metergate.dev", "email_verified": true,
-		"name": "Alice",
-		// openidconnect requires a nonce claim matching the authorize nonce
+		"email": email, "email_verified": true,
+		"name":  email,
 		"nonce": "",
 	})
 	w.Header().Set("Content-Type", "application/json")
@@ -162,6 +242,8 @@ var _ = x509.MarshalPKIXPublicKey
 var _ = pem.EncodeToMemory
 
 func main() {
+	loadConfig()
+	log.Printf("mock-oidc: %d client(s), %d user(s), issuer=%s", len(cfg.Clients), len(cfg.Users), cfg.Issuer)
 	http.HandleFunc("/.well-known/openid-configuration", discovery)
 	http.HandleFunc("/authorize", authorize)
 	http.HandleFunc("/token", token)

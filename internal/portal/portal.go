@@ -23,8 +23,10 @@ type API struct {
 	auth     *auth.Service
 	payments *payment.Service
 	adminKey string
-	jwt      *auth.JWTManager // may be nil (JWT disabled)
-	oidc     *auth.OIDC       // may be nil (OIDC disabled)
+	jwt      *auth.JWTManager                                       // may be nil (JWT disabled)
+	oidc     *auth.OIDC                                             // may be nil (OIDC disabled)
+	balance  func(ctx context.Context, userID int64) (int64, error) // may be nil
+	webDir   string                                                 // static merchant portal directory (optional)
 }
 
 // New builds the portal API.
@@ -44,6 +46,18 @@ func (api *API) WithOIDC(o *auth.OIDC) *API {
 	return api
 }
 
+// WithBalance attaches the balance reader (Redis-backed).
+func (api *API) WithBalance(fn func(ctx context.Context, userID int64) (int64, error)) *API {
+	api.balance = fn
+	return api
+}
+
+// WithWeb serves the merchant portal static files at /.
+func (api *API) WithWeb(dir string) *API {
+	api.webDir = dir
+	return api
+}
+
 // Handler returns the portal router (admin-key protected in dev;
 // session/JWT auth replaces this in production).
 func (api *API) Handler() http.Handler {
@@ -59,6 +73,10 @@ func (api *API) Handler() http.Handler {
 		mux.Handle("/api/oidc/login", api.oidc)
 		mux.Handle("/api/oidc/callback", api.oidc)
 	}
+	mux.HandleFunc("GET /api/balance", api.balanceHandler)
+	if api.webDir != "" {
+		mux.Handle("/", http.FileServer(http.Dir(api.webDir)))
+	}
 	return api.authMiddleware(mux)
 }
 
@@ -67,6 +85,12 @@ func (api *API) authMiddleware(next http.Handler) http.Handler {
 		// OIDC endpoints are public: the IdP redirects back WITHOUT our
 		// auth header (browser flow), so /api/oidc/* must bypass.
 		if strings.HasPrefix(r.URL.Path, "/api/oidc/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Static merchant portal assets are public (all data flows
+		// through the authenticated /api/* endpoints).
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -96,6 +120,25 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// balanceHandler returns the authenticated user's balance (JWT context).
+func (api *API) balanceHandler(w http.ResponseWriter, r *http.Request) {
+	uid, err := userFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "authenticated user required"})
+		return
+	}
+	if api.balance == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "balance reader not configured"})
+		return
+	}
+	bal, err := api.balance(r.Context(), uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user_id": uid, "balance_micros": bal})
 }
 
 // userFromRequest extracts user_id: JWT context first, then query/header.

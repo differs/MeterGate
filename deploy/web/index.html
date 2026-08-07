@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeterGate 商户门户</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --line:#334155; --fg:#e2e8f0; --acc:#38bdf8; --ok:#4ade80; --err:#f87171; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; min-height:100vh; }
+  .wrap { max-width:680px; margin:0 auto; padding:24px; }
+  h1 { font-size:20px; margin-bottom:4px; }
+  .sub { color:#94a3b8; font-size:13px; margin-bottom:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .card h2 { font-size:14px; color:var(--acc); margin-bottom:12px; }
+  input, button { font-size:14px; padding:8px 10px; border-radius:6px; border:1px solid var(--line); background:#0b1220; color:var(--fg); }
+  button { background:var(--acc); color:#062033; font-weight:600; cursor:pointer; border:none; }
+  button:hover { filter:brightness(1.1); }
+  button.ghost { background:transparent; color:var(--acc); border:1px solid var(--acc); }
+  .row { display:flex; gap:8px; margin-bottom:8px; align-items:center; flex-wrap:wrap; }
+  .muted { color:#94a3b8; font-size:13px; }
+  .ok { color:var(--ok); } .err { color:var(--err); }
+  pre { background:#0b1220; border:1px solid var(--line); border-radius:6px; padding:8px; font-size:12px; overflow-x:auto; margin-top:8px; }
+  .hidden { display:none; }
+  .balance { font-size:24px; font-weight:700; color:var(--acc); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>⚡ MeterGate 商户门户</h1>
+  <div class="sub">商用量级 AI Token 聚合平台 · 用户控制台</div>
+
+  <!-- 登录区 -->
+  <div class="card" id="loginCard">
+    <h2>登录</h2>
+    <div class="row"><input id="u" placeholder="用户名"><input id="p" type="password" placeholder="密码"><button onclick="login()">登录</button></div>
+    <div class="row"><button class="ghost" onclick="location.href='/api/oidc/login'">使用 OIDC 登录（SSO）</button></div>
+    <div class="muted">没有账号？<a href="#" style="color:var(--acc)" onclick="reg();return false">注册</a></div>
+  </div>
+
+  <!-- 用户区 -->
+  <div class="card hidden" id="userCard">
+    <div class="row"><span class="muted">用户 ID：</span><b id="uid"></b></div>
+    <div class="row"><span class="muted">余额：</span><span class="balance" id="bal">-</span></div>
+    <div class="row"><button class="ghost" onclick="refreshBalance()">刷新余额</button><button class="ghost" onclick="logout()">退出</button></div>
+  </div>
+
+  <!-- 充值 -->
+  <div class="card hidden" id="rechargeCard">
+    <h2>充值</h2>
+    <div class="row">
+      <input id="amt" type="number" placeholder="金额（元）" value="100">
+      <button onclick="recharge()">充值</button>
+    </div>
+    <div id="rechargeStatus" class="muted"></div>
+  </div>
+
+  <!-- API Key -->
+  <div class="card hidden" id="keyCard">
+    <h2>API Key</h2>
+    <div class="row"><input id="keyName" placeholder="名称（如 prod）" value="default"><button onclick="createKey()">创建 Key</button></div>
+    <div id="newKey" class="hidden"><div class="muted">新 Key（仅显示一次）：</div><pre id="newKeyVal"></pre></div>
+    <div id="keyList"></div>
+  </div>
+
+  <div class="card hidden" id="msgCard"><div id="msg"></div></div>
+</div>
+
+<script>
+const TOKEN_KEY = 'mg_token';
+let token = localStorage.getItem(TOKEN_KEY) || '';
+
+function api(path, opts={}) {
+  const headers = Object.assign({'Content-Type':'application/json'}, opts.headers||{});
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  return fetch(path, Object.assign({}, opts, {headers})).then(async r => {
+    const body = await r.json().catch(()=>({}));
+    if (!r.ok) throw new Error(body.error || ('HTTP '+r.status));
+    return body;
+  });
+}
+
+function show(el, on){ document.getElementById(el).classList.toggle('hidden', !on); }
+function msg(t, ok){ const m=document.getElementById('msg'); m.textContent=t; m.className=ok?'ok':'err'; show('msgCard', true); }
+
+function logout(){ token=''; localStorage.removeItem(TOKEN_KEY); show('userCard',false);show('rechargeCard',false);show('keyCard',false);show('loginCard',true); }
+
+async function login(){
+  try {
+    const d = await api('/api/login', {method:'POST', body:JSON.stringify({username:document.getElementById('u').value, password:document.getElementById('p').value})});
+    token = d.token; localStorage.setItem(TOKEN_KEY, token);
+    document.getElementById('uid').textContent = d.user_id;
+    show('loginCard', false); show('userCard', true); show('rechargeCard', true); show('keyCard', true);
+    refreshBalance(); listKeys();
+  } catch(e){ msg(e.message, false); }
+}
+
+async function reg(){
+  try {
+    await api('/api/register', {method:'POST', body:JSON.stringify({username:document.getElementById('u').value, password:document.getElementById('p').value})});
+    msg('注册成功，请登录', true);
+  } catch(e){ msg(e.message, false); }
+}
+
+async function refreshBalance(){
+  try { const d = await api('/api/balance'); document.getElementById('bal').textContent = (d.balance_micros/1e8).toFixed(2)+' 元'; }
+  catch(e){ msg(e.message, false); }
+}
+
+async function recharge(){
+  const yuan = parseFloat(document.getElementById('amt').value);
+  if (!yuan || yuan<=0) return msg('金额无效', false);
+  try {
+    const uid = document.getElementById('uid').textContent;
+    const d = await api('/api/recharge?user_id='+uid, {method:'POST', body:JSON.stringify({amount_micros: Math.round(yuan*1e8), idempotency_key:'web-'+Date.now()})});
+    const pay = await api('/api/recharge/pay', {method:'POST', body:JSON.stringify({recharge_id:d.recharge_id, channel:'mock'})});
+    document.getElementById('rechargeStatus').textContent = '充值成功：'+pay.txn_id;
+    refreshBalance();
+  } catch(e){ document.getElementById('rechargeStatus').textContent='充值失败：'+e.message; }
+}
+
+async function createKey(){
+  try {
+    const uid = document.getElementById('uid').textContent;
+    const d = await api('/api/keys?user_id='+uid, {method:'POST', body:JSON.stringify({name:document.getElementById('keyName').value})});
+    document.getElementById('newKeyVal').textContent = d.key;
+    show('newKey', true); listKeys();
+  } catch(e){ msg(e.message, false); }
+}
+
+async function listKeys(){
+  try {
+    const uid = document.getElementById('uid').textContent;
+    const d = await api('/api/keys?user_id='+uid);
+    const keys = d.keys || [];
+    document.getElementById('keyList').innerHTML = '<div class="muted">已有 Key：' + keys.length + '</div>' + keys.map(k=>`<pre>#${k[0]} ${k[1]||''} ${k[2]===1?'✓':'✗'}</pre>`).join('');
+  } catch(e){ /* ignore */ }
+}
+
+// 从 URL 提取 JWT（OIDC callback 返回后，由后端 Set-Cookie 或 JSON；此处支持 token 查询参数）
+const q = new URLSearchParams(location.search);
+if (q.get('token')) { token = q.get('token'); localStorage.setItem(TOKEN_KEY, token); history.replaceState({},'',location.pathname); }
+if (token) { document.getElementById('uid').textContent='...'; show('loginCard',false); show('userCard',true); show('rechargeCard',true); show('keyCard',true); refreshBalance(); listKeys(); }
+</script>
+</body>
+</html>

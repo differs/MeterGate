@@ -1,0 +1,16 @@
+{
+  "issuer": "http://127.0.0.1:5557",
+  "clients": [
+    { "id": "metergate", "secret": "mock-secret",
+      "redirect_uris": [
+        "http://localhost:3002/api/oidc/callback",
+        "http://localhost:3202/api/oidc/callback"
+      ] },
+    { "id": "partner-app", "secret": "partner-secret",
+      "redirect_uris": ["http://localhost:9999/callback"] }
+  ],
+  "users": [
+    { "subject": "oidc-user-alice", "email": "alice@metergate.dev" },
+    { "subject": "oidc-user-bob",   "email": "bob@metergate.dev" }
+  ]
+}

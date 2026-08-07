@@ -221,6 +221,18 @@ Verified end-to-end: register → login → key → recharge → mock pay →
 consume with the new key → balance exact; duplicate recharge (same
 idempotency_key) and duplicate callback both no-op (money safe).
 
+## Merchant portal (web UI)
+
+```bash
+METERGATE_WEB_DIR=./deploy/web ./metergate   # portal port 3002 serves the UI
+# open http://localhost:3002 — login (password or OIDC SSO), API key
+# management, recharge + mock pay, live balance
+```
+
+Single-page UI (`deploy/web/index.html`, no build step) calling the
+authenticated portal APIs. Static assets are public; all data flows
+through /api/* with JWT or admin key.
+
 ## Sessions (JWT + OIDC)
 
 ```bash

@@ -240,6 +240,15 @@ func main() {
 			paySvc.RegisterChannel(payment.MockChannel{})
 
 			portalAPI := portal.New(authSvc, paySvc, adminKey)
+			if precharger != nil {
+				portalAPI.WithBalance(func(ctx context.Context, userID int64) (int64, error) {
+					return precharger.Balance(ctx, "user-"+fmt.Sprint(userID))
+				})
+			}
+			if webDir := envOr("METERGATE_WEB_DIR", ""); webDir != "" {
+				portalAPI.WithWeb(webDir)
+				logger.Info("merchant portal web enabled", "dir", webDir)
+			}
 
 			// JWT sessions (HS256; secret from env, >= 32 bytes)
 			if jwtSecret := envOr("METERGATE_JWT_SECRET", ""); jwtSecret != "" {
