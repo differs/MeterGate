@@ -3,7 +3,9 @@ package billing
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"log/slog"
+	"runtime"
 	"sync"
 	"time"
 
@@ -11,32 +13,38 @@ import (
 )
 
 // Settler consumes request-level metering events and persists terminal
-// orders in BATCHES (M5): events accumulate in a buffer and flush every
-// `batch` rows or `maxWait`, whichever comes first — one commit per batch
-// instead of one per request (fsync 15K/s → ~30/s).
+// orders in BATCHES: events accumulate in per-shard buffers and flush
+// every `batch` rows or `maxWait`, whichever comes first — one commit per
+// batch instead of one per request (fsync 15K/s → ~30/s).
 //
-//	event ──▶ buffer ──▶ INSERT multi-row (idempotent) ──▶ pre-charge settle
+// Concurrency: the buffer is SHARDED (default: NumCPU shards, each with
+// its own mutex + flusher goroutine). Events are routed by request_id
+// hash, so parallel event producers never contend on a single lock — the
+// load-test bottleneck that capped throughput at ~5.5K req/s.
 //
-// Idempotency: orders.request_id is UNIQUE; batch replay is safe. The
-// pre-charge settle step is per-row and itself idempotent (SettleScript
-// no-ops for unknown/expired pre-charges).
+//	event ──▶ shard(hash) ──▶ batch INSERT (idempotent) ──▶ pre-charge settle
+//
+// Idempotency: orders.request_id is UNIQUE; batch replay is safe.
 type Settler struct {
 	store   OrderStore
 	pre     *Precharger // nil disables the Redis settle step
 	log     *slog.Logger
 	batch   int
 	maxWait time.Duration
-
-	mu      sync.Mutex
-	buf     []Order
-	pending []metering.Event // events whose orders are in buf (for settle)
-	flushAt time.Time
-	trigger chan struct{} // buffered(1): async flush signal — Handle never blocks
-	done    chan struct{}
+	shards  []*settleShard
 	wg      sync.WaitGroup
 }
 
-// NewSettler builds a Settler with batch-commit semantics.
+type settleShard struct {
+	mu      sync.Mutex
+	buf     []Order
+	pending []metering.Event
+	flushAt time.Time
+	trigger chan struct{}
+	done    chan struct{}
+}
+
+// NewSettler builds a Settler with batched, sharded writes.
 // batch: rows per commit (default 500). maxWait: flush deadline (default 50ms).
 func NewSettler(store OrderStore, pre *Precharger, log *slog.Logger, batch int) *Settler {
 	if batch <= 0 {
@@ -45,99 +53,110 @@ func NewSettler(store OrderStore, pre *Precharger, log *slog.Logger, batch int) 
 	if log == nil {
 		log = slog.Default()
 	}
+	n := runtime.NumCPU()
+	if n < 4 {
+		n = 4
+	}
+	if n > 32 {
+		n = 32
+	}
 	s := &Settler{
 		store:   store,
 		pre:     pre,
 		log:     log,
 		batch:   batch,
 		maxWait: 50 * time.Millisecond,
-		trigger: make(chan struct{}, 1),
-		done:    make(chan struct{}),
+		shards:  make([]*settleShard, n),
 	}
-	s.wg.Add(1)
-	go s.flushLoop()
+	for i := range s.shards {
+		sh := &settleShard{
+			trigger: make(chan struct{}, 1),
+			done:    make(chan struct{}),
+		}
+		s.shards[i] = sh
+		s.wg.Add(1)
+		go s.flushLoop(sh)
+	}
 	return s
 }
 
 // Handle buffers one metering event. Non-blocking; drops the event when
-// the buffer is full (the gateway must never back up on billing — lost
-// events are recoverable from audit logs in reconciliation).
+// the shard buffer is full (the gateway must never back up on billing —
+// lost events are recoverable from audit logs in reconciliation).
 func (s *Settler) Handle(ctx context.Context, ev metering.Event) error {
 	if ev.RequestID == "" {
 		return errors.New("metering event missing request_id")
 	}
 	o := orderFromEvent(ev)
 	if o == nil {
-		return nil // failed request → nothing to bill (zero-completion insurance)
+		return nil // failed request → nothing to bill
 	}
-
-	s.mu.Lock()
-	s.buf = append(s.buf, *o)
-	s.pending = append(s.pending, ev)
-	full := len(s.buf) >= s.batch
-	if !full && s.flushAt.IsZero() {
-		s.flushAt = time.Now().Add(s.maxWait)
+	sh := s.shards[shardIndex(ev.RequestID, len(s.shards))]
+	sh.mu.Lock()
+	sh.buf = append(sh.buf, *o)
+	sh.pending = append(sh.pending, ev)
+	full := len(sh.buf) >= s.batch
+	if !full && sh.flushAt.IsZero() {
+		sh.flushAt = time.Now().Add(s.maxWait)
 	}
-	s.mu.Unlock()
-
+	sh.mu.Unlock()
 	if full {
-		s.signalFlush()
+		s.signalFlush(sh)
 	}
 	return nil
 }
 
-// signalFlush wakes the single flusher goroutine without blocking the
-// caller (the hot path never waits on billing I/O).
-func (s *Settler) signalFlush() {
+func (s *Settler) signalFlush(sh *settleShard) {
 	select {
-	case s.trigger <- struct{}{}:
-	default: // already pending
+	case sh.trigger <- struct{}{}:
+	default:
 	}
 }
 
-// flushLoop is the single flusher: triggered by batch-full signals and by
-// the maxWait deadline for partial batches. All PG/Redis I/O happens here,
-// off the event-consumption path.
-func (s *Settler) flushLoop() {
+// flushLoop is one shard's flusher: triggered by batch-full signals and
+// the maxWait deadline. All PG/Redis I/O happens here, off the event
+// consumption path.
+func (s *Settler) flushLoop(sh *settleShard) {
 	defer s.wg.Done()
 	ticker := time.NewTicker(s.maxWait)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-s.done:
+		case <-sh.done:
 			return
-		case <-s.trigger:
-			s.flush()
+		case <-sh.trigger:
+			s.flush(sh)
 		case <-ticker.C:
-			s.mu.Lock()
-			due := !s.flushAt.IsZero() && time.Now().After(s.flushAt)
-			s.mu.Unlock()
+			sh.mu.Lock()
+			due := !sh.flushAt.IsZero() && time.Now().After(sh.flushAt)
+			sh.mu.Unlock()
 			if due {
-				s.flush()
+				s.flush(sh)
 			}
 		}
 	}
 }
 
-// flush writes the buffered orders in one batch and settles pre-charges.
-func (s *Settler) flush() {
-	s.mu.Lock()
-	if len(s.buf) == 0 {
-		s.mu.Unlock()
+// flush writes the shard's buffered orders in one batch and settles
+// pre-charges (one Redis pipeline round-trip).
+func (s *Settler) flush(sh *settleShard) {
+	sh.mu.Lock()
+	if len(sh.buf) == 0 {
+		sh.mu.Unlock()
 		return
 	}
-	orders := s.buf
-	events := s.pending
-	s.buf = nil
-	s.pending = nil
-	s.flushAt = time.Time{}
-	s.mu.Unlock()
+	orders := sh.buf
+	events := sh.pending
+	sh.buf = nil
+	sh.pending = nil
+	sh.flushAt = time.Time{}
+	sh.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := s.store.InsertOrders(ctx, orders); err != nil {
-		s.log.Error("batch order insert failed (orders will be lost unless replayed)",
+		s.log.Error("batch order insert failed (orders lost unless replayed)",
 			"count", len(orders), "err", err)
 		return
 	}
@@ -150,17 +169,52 @@ func (s *Settler) flush() {
 			}
 			settles[i] = SettleReq{UserID: ev.UserID, RequestID: ev.RequestID, ChargedMicros: charged}
 		}
-		// One Redis round-trip for the whole batch (pipeline).
 		s.pre.BatchSettle(ctx, settles)
 	}
-	s.log.Debug("batch settled", "count", len(orders))
+	s.log.Debug("batch settled", "shard", shardOf(sh, s.shards), "count", len(orders))
 }
 
-// Close flushes remaining rows and stops the flusher.
+// FlushSync forces all shards to flush NOW and blocks until every batch
+// is persisted. Used by the Kafka consumer BEFORE committing offsets —
+// closes the "commit before durable write" loss window (at-least-once
+// becomes truly at-least-once).
+func (s *Settler) FlushSync(ctx context.Context) error {
+	var wg sync.WaitGroup
+	for _, sh := range s.shards {
+		wg.Add(1)
+		go func(sh *settleShard) {
+			defer wg.Done()
+			s.flush(sh)
+		}(sh)
+	}
+	wg.Wait()
+	return ctx.Err()
+}
+
+// Close flushes remaining rows and stops all shard flushers.
 func (s *Settler) Close() {
-	close(s.done)
-	s.flush()
+	for _, sh := range s.shards {
+		close(sh.done)
+	}
+	for _, sh := range s.shards {
+		s.flush(sh)
+	}
 	s.wg.Wait()
+}
+
+func shardIndex(key string, n int) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return int(h.Sum32() % uint32(n))
+}
+
+func shardOf(sh *settleShard, shards []*settleShard) int {
+	for i, s := range shards {
+		if s == sh {
+			return i
+		}
+	}
+	return -1
 }
 
 // orderFromEvent converts a metering event to a terminal order.

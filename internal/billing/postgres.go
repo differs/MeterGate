@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -144,33 +145,53 @@ func (s *PostgresOrderStore) MarkExecuted(ctx context.Context, id int64) error {
 	return err
 }
 
-// InsertOrders implements OrderStore: multi-row INSERT in a single
-// statement (one commit). Batch sizes are bounded by the caller (Settler).
+// InsertOrders implements OrderStore: a true multi-row INSERT — ONE
+// statement, ONE commit, ONE fsync for the whole batch. (A per-row batch
+// of 500 independent INSERTs costs 500 fsyncs and is 50-100x slower — the
+// load-test bottleneck; see docs/benchmark.md.)
+// Batches are capped at 1,000 rows (12,000 bind params < PG's 65,535 limit).
 func (s *PostgresOrderStore) InsertOrders(ctx context.Context, orders []Order) error {
 	if len(orders) == 0 {
 		return nil
 	}
-	b := &pgx.Batch{}
-	for _, o := range orders {
-		b.Queue(`
-			INSERT INTO orders
-				(request_id, user_id, model, provider, status,
-				 prompt_tokens, completion_tokens, total_tokens,
-				 amount_micros, duration_ms, ttft_ms, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-			ON CONFLICT (request_id) DO NOTHING`,
-			o.RequestID, o.UserID, o.Model, o.Provider, o.Status,
-			o.PromptTokens, o.CompletionTokens, o.TotalTokens,
-			o.AmountMicros, o.DurationMs, o.TTFTMs, time.Now())
-	}
-	br := s.pool.SendBatch(ctx, b)
-	defer br.Close()
-	for range orders {
-		if _, err := br.Exec(); err != nil {
+	const cols = 12
+	for start := 0; start < len(orders); start += 1000 {
+		end := min(start+1000, len(orders))
+		batch := orders[start:end]
+
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO orders
+			(request_id, user_id, model, provider, status,
+			 prompt_tokens, completion_tokens, total_tokens,
+			 amount_micros, duration_ms, ttft_ms, created_at)
+			VALUES `)
+		args := make([]any, 0, len(batch)*cols)
+		now := time.Now()
+		for i, o := range batch {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			base := i * cols
+			sb.WriteString(fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+				base+1, base+2, base+3, base+4, base+5, base+6,
+				base+7, base+8, base+9, base+10, base+11, base+12))
+			args = append(args, o.RequestID, o.UserID, o.Model, o.Provider, o.Status,
+				o.PromptTokens, o.CompletionTokens, o.TotalTokens,
+				o.AmountMicros, o.DurationMs, o.TTFTMs, now)
+		}
+		sb.WriteString(" ON CONFLICT (request_id) DO NOTHING")
+		if _, err := s.pool.Exec(ctx, sb.String(), args...); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Anomalies returns human-readable anomaly descriptions for a day:

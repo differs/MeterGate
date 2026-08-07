@@ -9,17 +9,28 @@ import (
 	"github.com/differs/MeterGate/internal/metering"
 )
 
-// memStore is an in-memory OrderStore for tests.
+// memStore is an in-memory OrderStore for tests (map-backed: O(1) lookups,
+// so it does not distort Settler throughput benchmarks).
 type memStore struct {
 	mu     sync.Mutex
 	orders []Order
+	byID   map[string]struct{}
+}
+
+func newMemStore() *memStore {
+	return &memStore{byID: map[string]struct{}{}}
 }
 
 func (m *memStore) InsertOrders(_ context.Context, orders []Order) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, o := range orders {
-		if _, err := m.InsertOrder(context.Background(), o); err != nil {
-			return err
+		if _, ok := m.byID[o.RequestID]; ok {
+			continue
 		}
+		o.CreatedAt = time.Now()
+		m.orders = append(m.orders, o)
+		m.byID[o.RequestID] = struct{}{}
 	}
 	return nil
 }
@@ -27,13 +38,12 @@ func (m *memStore) InsertOrders(_ context.Context, orders []Order) error {
 func (m *memStore) InsertOrder(_ context.Context, o Order) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, ex := range m.orders {
-		if ex.RequestID == o.RequestID {
-			return false, nil
-		}
+	if _, ok := m.byID[o.RequestID]; ok {
+		return false, nil
 	}
 	o.CreatedAt = time.Now()
 	m.orders = append(m.orders, o)
+	m.byID[o.RequestID] = struct{}{}
 	return true, nil
 }
 

@@ -150,16 +150,13 @@ func (s *Server) handleStream(ctx context.Context, w http.ResponseWriter, call *
 	}
 
 	call.OnChunk = func(data []byte) error {
-		chunk, err := openai.ParseChunk(data)
-		if err != nil {
-			return err
+		// Fast-path metering: extract the delta content with a targeted
+		// scan instead of a full JSON unmarshal per chunk (the streaming
+		// hot path processes one chunk per ~10-30ms of upstream output).
+		if content := fastDeltaContent(data); content != "" {
+			acc.AddDelta(content)
 		}
-		for _, c := range chunk.Choices {
-			if c.Delta.Content != "" {
-				acc.AddDelta(c.Delta.Content)
-			}
-		}
-		// Forward verbatim.
+		// Forward verbatim (zero re-encoding).
 		_, werr := w.Write(append(append([]byte("data: "), data...), '\n', '\n'))
 		flusher.Flush()
 		return werr
@@ -191,9 +188,12 @@ func (s *Server) handleStream(ctx context.Context, w http.ResponseWriter, call *
 
 func (s *Server) emit(ev metering.Event) {
 	ev.Timestamp = s.now()
-	// Always log (audit trail, zero-dependency default sink).
+	// Audit log at Debug level: the event is already durably stored via
+	// the sink chain (Kafka/ClickHouse/PostgreSQL); the log line exists
+	// as a last-resort fallback and must never tax the hot path.
+	// Enable with METERGATE_LOG_LEVEL=debug.
 	b, _ := json.Marshal(ev)
-	s.log.Info("metering", "event", string(b))
+	s.log.Debug("metering", "event", string(b))
 	// Forward to the billing pipeline when wired (M2+).
 	if s.sink != nil {
 		_ = s.sink.Emit(ev)
@@ -207,6 +207,52 @@ func providerOf(call *ChatCall) string {
 		return call.Provider
 	}
 	return call.UpstreamURL
+}
+
+// fastDeltaContent scans an SSE chunk payload for the first
+// "content":"..." delta and returns it without allocating a full parse.
+// Malformed payloads fall back to "" (metering underestimates slightly;
+// exact billing always prefers upstream usage).
+func fastDeltaContent(data []byte) string {
+	marker := []byte(`"content":"`)
+	idx := bytes.Index(data, marker)
+	if idx < 0 {
+		return ""
+	}
+	start := idx + len(marker)
+	end := bytes.IndexByte(data[start:], '"')
+	if end < 0 {
+		return ""
+	}
+	s := data[start : start+end]
+	// unescape common sequences (\n, \", \\, \t)
+	if bytes.IndexByte(s, '\\') < 0 {
+		return string(s)
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case 'n':
+				b.WriteByte('\n')
+			case 't':
+				b.WriteByte('\t')
+			case '"':
+				b.WriteByte('"')
+			case '\\':
+				b.WriteByte('\\')
+			case 'r':
+				b.WriteByte('\r')
+			default:
+				b.WriteByte(s[i+1])
+			}
+			i++
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 func maxTokensPtr(v *int) *int64 {

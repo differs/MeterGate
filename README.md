@@ -19,12 +19,15 @@ All open-source LLM relays have the same two blind spots — **we measured them*
 | one-api (PostgreSQL) | 495 req/s | non-atomic | none |
 | new-api (PostgreSQL) | 146 req/s | atomic SQL, batch queue | partial |
 | LiteLLM (PostgreSQL) | 213 req/s | Redis counter + DB fallback | none |
-| **MeterGate** (full billing: Redis pre-charge + PG batch + CH detail + Kafka) | **5,511 req/s** | **Redis Lua atomic + clawback** | **3-layer, auto-refund** |
+| **MeterGate** (full billing: Redis pre-charge + PG batch + CH detail + Kafka) | **22,416 req/s** | **Redis Lua atomic + clawback** | **3-layer, auto-refund** |
 
 > Benchmark environment: 16-core machine, dockerized PG/Redis/ClickHouse/Redpanda,
 > local mock upstream (166K req/s baseline). MeterGate's number includes the
-> COMPLETE billing pipeline — the open-source numbers are bare forwarding
-> without billing precision guarantees. Full report in `docs/benchmark.md`.
+> COMPLETE billing pipeline (Redis pre-charge, batched PG settle, ClickHouse
+> details, Kafka event bus + consumer) — the open-source numbers are bare
+> forwarding without billing precision guarantees. **v2 after hot-path
+> optimization: 22.4K req/s** (was 5.5K; see `docs/benchmark.md` for the
+> bottleneck-by-bottleneck breakdown). Full report in `docs/benchmark.md`.
 
 ## Features
 

@@ -30,8 +30,9 @@ func NewHTTPUpstream(endpoint, key string) *HTTPUpstream {
 		Client: &http.Client{
 			Timeout: 10 * time.Minute, // LLM streams can be long
 			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 32,
+				MaxIdleConns:        1024,
+				MaxIdleConnsPerHost: 512,
+				MaxConnsPerHost:     0, // unlimited (gateway fan-out)
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},

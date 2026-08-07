@@ -6,15 +6,42 @@
 
 ## 1. MeterGate throughput (full billing pipeline enabled)
 
+### v2 (after hot-path optimizations)
+
 | Scenario | req/s | avg latency |
 |----------|-------|-------------|
-| non-stream, 100 concurrent (30s) | **5,511** | 18ms |
-| non-stream, 500 concurrent (30s) | **1,253** | 395ms |
-| streaming, 50 concurrent (30s) | **323** | 155ms |
+| non-stream, 100 concurrent (30s) | **22,416** | 4.5ms |
+| non-stream, 500 concurrent (30s) | **26,408** | 19ms |
+| streaming, 50 concurrent (30s) | **312** | 160ms (theoretical limit 322) |
 
-> The 500-concurrent case is bounded by the dockerized PG/Redis round-trips;
-> bare-metal deployments scale further. The gateway hot path itself is
-> lock-free and makes zero DB calls.
+### v1 (pre-optimization, for reference)
+
+| Scenario | req/s | avg latency |
+|----------|-------|-------------|
+| non-stream, 100 concurrent (30s) | 5,511 | 18ms |
+| non-stream, 500 concurrent (30s) | 1,253 | 395ms |
+| streaming, 50 concurrent (30s) | 323 | 155ms |
+
+### What the 4x speedup was
+
+| Bottleneck found by load test | Fix | Gain |
+|-------------------------------|-----|------|
+| synchronous metering log on hot path (77MB of JSON in one run) | Debug level (audit lives in Kafka/CH/PG) | major |
+| Settler global mutex (all events, one lock) | 16-shard buffers, hash-routed, per-shard flusher | major |
+| 500 independent INSERTs per batch (500 fsyncs) | true multi-row INSERT, one statement one commit | major |
+| Kafka per-message CommitMessages (~1ms RPC each → 489 events/s) | batched commits (500/200ms) → 85K events/s | 174x on the consumer |
+| residual batch stuck when topic goes quiet | bounded FetchMessage + drain flush on deadline | correctness |
+| commit before durable write (loss window) | Settler.FlushSync before commit | correctness |
+
+### Billing integrity (367,746 requests, full Kafka consumer mode)
+
+| Check | Result |
+|-------|--------|
+| event loss | **0** |
+| Layer A: PG orders == ClickHouse details | **exact** (367,746 rows / 82,742,850 micros both sides) |
+| balance precision | **exact to the micro** |
+| frozen after drain | **0** |
+| Kafka consumer lag after drain | **0**
 
 ## 2. Billing integrity under load (213,600 requests, 3 scenarios)
 

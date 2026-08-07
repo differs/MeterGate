@@ -132,7 +132,7 @@ func TestPreChargeNoChargeFullRelease(t *testing.T) {
 }
 
 func TestSettleIdempotent(t *testing.T) {
-	store := &memStore{}
+	store := newMemStore()
 	settler := NewSettler(store, nil, testLogger(), 10)
 	ctx := context.Background()
 
@@ -157,7 +157,7 @@ func TestSettleIdempotent(t *testing.T) {
 }
 
 func TestSettleBatch(t *testing.T) {
-	store := &memStore{}
+	store := newMemStore()
 	settler := NewSettler(store, nil, testLogger(), 10) // batch size 10
 	ctx := context.Background()
 	for i := 0; i < 25; i++ {
