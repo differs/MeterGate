@@ -192,6 +192,14 @@ METERGATE_CONFIG=./configs/routing.example.yaml ./metergate
   (verified: killing the primary channel yields 100% successful requests
   through the fallback).
 
+## Writing
+
+- **Blog — Billing precision under load**: [docs/blog/billing-precision.md](docs/blog/billing-precision.md)
+  (why integer math, dual-track metering, and how a 213k-request audit
+  caught two real money leaks)
+- **Show HN**: [docs/posts/show-hn.md](docs/posts/show-hn.md)
+- **Chinese community post**: [docs/posts/chinese-community.md](docs/posts/chinese-community.md)
+
 ## License
 
 MIT
