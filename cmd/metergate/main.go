@@ -250,6 +250,11 @@ func main() {
 			}); ok {
 				portalAPI.WithUsage(usageStore.UsageByDay)
 			}
+			if modelStore, ok := store.(interface {
+				UsageByModel(ctx context.Context, userID string, days int) ([]billing.UsageByModel, error)
+			}); ok {
+				portalAPI.WithUsageByModel(modelStore.UsageByModel)
+			}
 			if webDir := envOr("METERGATE_WEB_DIR", ""); webDir != "" {
 				portalAPI.WithWeb(webDir)
 				logger.Info("merchant portal web enabled", "dir", webDir)

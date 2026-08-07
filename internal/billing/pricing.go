@@ -66,7 +66,26 @@ func UpdatePrice(model string, p ModelPrice) {
 	priceTable.Store(next)
 }
 
+// CostPriceFor returns the SUPPLIER cost price (margin analysis). Falls
+// back to the user price if no cost table entry exists (cost=revenue →
+// zero margin, safe default that never overstates profit).
+func CostPriceFor(model string) ModelPrice {
+	if p, ok := costTable.Load().prices[model]; ok {
+		return p
+	}
+	return PriceFor(model)
+}
+
+// UpdateCostPrice sets/updates the supplier cost price for a model.
+func UpdateCostPrice(model string, p ModelPrice) {
+	next := costTable.Load()
+	next.Set(model, p)
+	costTable.Store(next)
+}
+
 var priceTable = newAtomicTable()
+
+var costTable = newAtomicTable()
 
 func newAtomicTable() atomicTable {
 	return atomicTable{ptr: atomic.Pointer[PriceTable]{}}

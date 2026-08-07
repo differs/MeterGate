@@ -68,6 +68,17 @@
     <div class="row"><button class="ghost" onclick="loadUsage()">刷新</button></div>
   </div>
 
+  <!-- 模型维度成本分析 -->
+  <div class="card hidden" id="modelCard">
+    <h2>模型成本分析 <span class="muted" style="font-weight:400">（最近 7 天）</span></h2>
+    <div class="row">
+      <div class="muted">收入：<b id="mRev" class="ok">-</b></div>
+      <div class="muted">成本：<b id="mCost" class="err">-</b></div>
+      <div class="muted">毛利：<b id="mMargin" class="ok">-</b></div>
+    </div>
+    <div id="modelList"></div>
+  </div>
+
   <!-- API Key -->
   <div class="card hidden" id="keyCard">
     <h2>API Key</h2>
@@ -104,7 +115,7 @@ async function login(){
     token = d.token; localStorage.setItem(TOKEN_KEY, token);
     document.getElementById('uid').textContent = d.user_id;
     show('loginCard', false); show('userCard', true); show('rechargeCard', true); show('keyCard', true);
-    refreshBalance(); listKeys(); loadUsage(); show('usageCard', true);
+    refreshBalance(); listKeys(); loadUsage(); loadModels(); show('usageCard', true); show('modelCard', true);
   } catch(e){ msg(e.message, false); }
 }
 
@@ -139,6 +150,38 @@ async function createKey(){
     document.getElementById('newKeyVal').textContent = d.key;
     show('newKey', true); listKeys();
   } catch(e){ msg(e.message, false); }
+}
+
+// ---- 模型维度成本分析 ----
+async function loadModels(){
+  try {
+    const d = await api('/api/usage/models?days=7');
+    const models = d.models || [];
+    document.getElementById('mRev').textContent = (d.total_revenue_micros/1e8).toFixed(2)+' 元';
+    document.getElementById('mCost').textContent = (d.total_cost_micros/1e8).toFixed(2)+' 元';
+    const margin = d.total_margin_micros;
+    const el = document.getElementById('mMargin');
+    el.textContent = (margin/1e8).toFixed(2)+' 元';
+    el.className = margin >= 0 ? 'ok' : 'err';
+
+    const max = Math.max(...models.map(m=>m.amount_micros), 1);
+    document.getElementById('modelList').innerHTML = models.map(m=>{
+      const w = Math.max(4, (m.amount_micros/max)*100);
+      const rate = m.amount_micros>0 ? (m.margin_micros/m.amount_micros*100).toFixed(1) : '0.0';
+      return `<div style="margin-bottom:10px">
+        <div class="row" style="margin-bottom:2px">
+          <b style="width:150px">${m.model}</b>
+          <span class="muted">${m.requests} 次 · ${(m.total_tokens/1000).toFixed(1)}k tokens</span>
+          <span class="ok">+${(m.amount_micros/1e8).toFixed(2)}</span>
+          <span class="err">-${(m.cost_micros/1e8).toFixed(2)}</span>
+          <span class="${m.margin_micros>=0?'ok':'err'}">毛利 ${rate}%</span>
+        </div>
+        <div style="background:#0b1220;border-radius:4px;height:8px">
+          <div style="width:${w.toFixed(1)}%;height:8px;border-radius:4px;background:${m.margin_micros>=0?'#4ade80':'#f87171'}"></div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e){ /* 未配置时静默 */ }
 }
 
 // ---- 用量报表（SVG 手绘图表） ----
@@ -187,7 +230,7 @@ async function listKeys(){
 // 从 URL 提取 JWT（OIDC callback 返回后，由后端 Set-Cookie 或 JSON；此处支持 token 查询参数）
 const q = new URLSearchParams(location.search);
 if (q.get('token')) { token = q.get('token'); localStorage.setItem(TOKEN_KEY, token); history.replaceState({},'',location.pathname); }
-if (token) { document.getElementById('uid').textContent='...'; show('loginCard',false); show('userCard',true); show('rechargeCard',true); show('keyCard',true); show('usageCard',true); refreshBalance(); listKeys(); loadUsage(); }
+if (token) { document.getElementById('uid').textContent='...'; show('loginCard',false); show('userCard',true); show('rechargeCard',true); show('keyCard',true); show('usageCard',true); show('modelCard',true); refreshBalance(); listKeys(); loadUsage(); loadModels(); }
 </script>
 </body>
 </html>

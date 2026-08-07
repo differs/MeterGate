@@ -367,6 +367,56 @@ func (s *PostgresOrderStore) UsageByDay(ctx context.Context, userID string, days
 	return out, rows.Err()
 }
 
+// UsageByModel aggregates a user's usage per model (merchant cost
+// analysis): revenue (amount) + estimated supplier cost + margin.
+type UsageByModel struct {
+	Model        string `json:"model"`
+	Requests     int64  `json:"requests"`
+	TotalTok     int64  `json:"total_tokens"`
+	AmountMicros int64  `json:"amount_micros"` // user-side revenue
+	CostMicros   int64  `json:"cost_micros"`   // supplier cost estimate
+	MarginMicros int64  `json:"margin_micros"` // revenue - cost
+}
+
+// UsageByModel aggregates per-model usage for a user over N days.
+func (s *PostgresOrderStore) UsageByModel(ctx context.Context, userID string, days int) ([]UsageByModel, error) {
+	if days <= 0 || days > 90 {
+		days = 7
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT model,
+		       count(*),
+		       COALESCE(SUM(total_tokens),0),
+		       COALESCE(SUM(amount_micros),0)
+		FROM orders
+		WHERE user_id = $1
+		  AND created_at >= now() - ($2 || ' days')::interval
+		  AND status = 'SETTLED'
+		GROUP BY model ORDER BY SUM(amount_micros) DESC`, userID, fmt.Sprint(days))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UsageByModel
+	for rows.Next() {
+		var m UsageByModel
+		if err := rows.Scan(&m.Model, &m.Requests, &m.TotalTok, &m.AmountMicros); err != nil {
+			return nil, err
+		}
+		// cost estimate: split prompt/completion by model cost price
+		// (approx: use total tokens at the blended cost — exact split
+		// needs per-row cost which lands with the ledger module)
+		cp := CostPriceFor(m.Model)
+		avgInputFrac := 0.35 // heuristic: ~35% of tokens are prompt
+		approxInput := int64(float64(m.TotalTok) * avgInputFrac)
+		approxOutput := m.TotalTok - approxInput
+		m.CostMicros = CalculateAmount(approxInput, approxOutput, cp)
+		m.MarginMicros = m.AmountMicros - m.CostMicros
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // Close releases the pool.
 func (s *PostgresOrderStore) Close() { s.pool.Close() }
 

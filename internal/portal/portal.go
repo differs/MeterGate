@@ -22,14 +22,15 @@ const ctxKeyUserID ctxKey = iota
 
 // API is the portal HTTP surface.
 type API struct {
-	auth     *auth.Service
-	payments *payment.Service
-	adminKey string
-	jwt      *auth.JWTManager                                                               // may be nil (JWT disabled)
-	oidc     *auth.OIDC                                                                     // may be nil (OIDC disabled)
-	balance  func(ctx context.Context, userID int64) (int64, error)                         // may be nil
-	usage    func(ctx context.Context, userID string, days int) ([]billing.UsageDay, error) // may be nil
-	webDir   string                                                                         // static merchant portal directory (optional)
+	auth         *auth.Service
+	payments     *payment.Service
+	adminKey     string
+	jwt          *auth.JWTManager                                                                   // may be nil (JWT disabled)
+	oidc         *auth.OIDC                                                                         // may be nil (OIDC disabled)
+	balance      func(ctx context.Context, userID int64) (int64, error)                             // may be nil
+	usage        func(ctx context.Context, userID string, days int) ([]billing.UsageDay, error)     // may be nil
+	usageByModel func(ctx context.Context, userID string, days int) ([]billing.UsageByModel, error) // may be nil
+	webDir       string                                                                             // static merchant portal directory (optional)
 }
 
 // New builds the portal API.
@@ -61,6 +62,12 @@ func (api *API) WithUsage(fn func(ctx context.Context, userID string, days int) 
 	return api
 }
 
+// WithUsageByModel attaches the per-model usage aggregator (cost analysis).
+func (api *API) WithUsageByModel(fn func(ctx context.Context, userID string, days int) ([]billing.UsageByModel, error)) *API {
+	api.usageByModel = fn
+	return api
+}
+
 // WithWeb serves the merchant portal static files at /.
 func (api *API) WithWeb(dir string) *API {
 	api.webDir = dir
@@ -84,6 +91,7 @@ func (api *API) Handler() http.Handler {
 	}
 	mux.HandleFunc("GET /api/balance", api.balanceHandler)
 	mux.HandleFunc("GET /api/usage", api.usageHandler)
+	mux.HandleFunc("GET /api/usage/models", api.usageModelsHandler)
 	if api.webDir != "" {
 		mux.Handle("/", http.FileServer(http.Dir(api.webDir)))
 	}
@@ -174,6 +182,42 @@ func (api *API) usageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"user_id": uid, "days": days, "usage": rows})
+}
+
+// usageModelsHandler returns per-model usage with cost/margin analysis.
+func (api *API) usageModelsHandler(w http.ResponseWriter, r *http.Request) {
+	uid, err := userFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "authenticated user required"})
+		return
+	}
+	if api.usageByModel == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "usage/models not configured"})
+		return
+	}
+	days := 7
+	if raw := r.URL.Query().Get("days"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			days = v
+		}
+	}
+	rows, err := api.usageByModel(r.Context(), fmt.Sprintf("user-%d", uid), days)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	var totalRevenue, totalCost int64
+	for _, m := range rows {
+		totalRevenue += m.AmountMicros
+		totalCost += m.CostMicros
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user_id": uid, "days": days,
+		"models":               rows,
+		"total_revenue_micros": totalRevenue,
+		"total_cost_micros":    totalCost,
+		"total_margin_micros":  totalRevenue - totalCost,
+	})
 }
 
 // userFromRequest extracts user_id: JWT context first, then query/header.
