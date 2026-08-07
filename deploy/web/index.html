@@ -55,6 +55,19 @@
     <div id="rechargeStatus" class="muted"></div>
   </div>
 
+  <!-- 用量报表 -->
+  <div class="card hidden" id="usageCard">
+    <h2>用量报表 <span class="muted" style="font-weight:400">（最近 7 天）</span></h2>
+    <div class="row">
+      <div class="muted">请求：<b id="uReq" class="ok">-</b></div>
+      <div class="muted">Token：<b id="uTok" class="ok">-</b></div>
+      <div class="muted">金额：<b id="uAmt" class="ok">-</b></div>
+    </div>
+    <div class="row"><svg id="reqChart" width="620" height="140" style="max-width:100%"></svg></div>
+    <div class="row"><svg id="tokChart" width="620" height="140" style="max-width:100%"></svg></div>
+    <div class="row"><button class="ghost" onclick="loadUsage()">刷新</button></div>
+  </div>
+
   <!-- API Key -->
   <div class="card hidden" id="keyCard">
     <h2>API Key</h2>
@@ -91,7 +104,7 @@ async function login(){
     token = d.token; localStorage.setItem(TOKEN_KEY, token);
     document.getElementById('uid').textContent = d.user_id;
     show('loginCard', false); show('userCard', true); show('rechargeCard', true); show('keyCard', true);
-    refreshBalance(); listKeys();
+    refreshBalance(); listKeys(); loadUsage(); show('usageCard', true);
   } catch(e){ msg(e.message, false); }
 }
 
@@ -128,6 +141,40 @@ async function createKey(){
   } catch(e){ msg(e.message, false); }
 }
 
+// ---- 用量报表（SVG 手绘图表） ----
+async function loadUsage(){
+  try {
+    const d = await api('/api/usage?days=7');
+    const u = d.usage || [];
+    const reqs = u.reduce((a,b)=>a+b.requests,0);
+    const toks = u.reduce((a,b)=>a+b.total_tokens,0);
+    const amts = u.reduce((a,b)=>a+b.amount_micros,0);
+    document.getElementById('uReq').textContent = reqs.toLocaleString();
+    document.getElementById('uTok').textContent = toks.toLocaleString();
+    document.getElementById('uAmt').textContent = (amts/1e8).toFixed(2)+' 元';
+    drawBars('reqChart', u.map(x=>({label:x.day.slice(5), v:x.requests})), '请求数');
+    drawBars('tokChart', u.map(x=>({label:x.day.slice(5), v:x.total_tokens})), 'Token');
+  } catch(e){ /* usage 未配置时静默 */ }
+}
+
+function drawBars(id, data, title){
+  const svg = document.getElementById(id);
+  if (!data || !data.length){ svg.innerHTML='<text x="10" y="20" fill="#64748b" font-size="12">暂无数据</text>'; return; }
+  const W=620, H=140, PAD=30;
+  const max = Math.max(...data.map(d=>d.v), 1);
+  const bw = (W-PAD*2) / data.length;
+  let html = `<text x="${PAD}" y="14" fill="#94a3b8" font-size="11">${title}</text>`;
+  data.forEach((d,i)=>{
+    const h = Math.max(2, (d.v/max)*(H-PAD-18));
+    const x = PAD + i*bw + bw*0.15, y = H - PAD - h;
+    html += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(bw*0.7).toFixed(1)}" height="${h.toFixed(1)}" rx="3" fill="#38bdf8" opacity="0.85">`;
+    html += `<title>${d.label}: ${d.v.toLocaleString()}</title></rect>`;
+    if (d.v > 0) html += `<text x="${(x+bw*0.35).toFixed(1)}" y="${(y-4).toFixed(1)}" fill="#e2e8f0" font-size="10" text-anchor="middle">${d.v>=1000?(d.v/1000).toFixed(1)+'k':d.v}</text>`;
+    html += `<text x="${(x+bw*0.35).toFixed(1)}" y="${(H-12).toFixed(1)}" fill="#64748b" font-size="10" text-anchor="middle">${d.label}</text>`;
+  });
+  svg.innerHTML = html;
+}
+
 async function listKeys(){
   try {
     const uid = document.getElementById('uid').textContent;
@@ -140,7 +187,7 @@ async function listKeys(){
 // 从 URL 提取 JWT（OIDC callback 返回后，由后端 Set-Cookie 或 JSON；此处支持 token 查询参数）
 const q = new URLSearchParams(location.search);
 if (q.get('token')) { token = q.get('token'); localStorage.setItem(TOKEN_KEY, token); history.replaceState({},'',location.pathname); }
-if (token) { document.getElementById('uid').textContent='...'; show('loginCard',false); show('userCard',true); show('rechargeCard',true); show('keyCard',true); refreshBalance(); listKeys(); }
+if (token) { document.getElementById('uid').textContent='...'; show('loginCard',false); show('userCard',true); show('rechargeCard',true); show('keyCard',true); show('usageCard',true); refreshBalance(); listKeys(); loadUsage(); }
 </script>
 </body>
 </html>

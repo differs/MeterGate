@@ -5,12 +5,14 @@ package portal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/differs/MeterGate/internal/auth"
+	"github.com/differs/MeterGate/internal/billing"
 	"github.com/differs/MeterGate/internal/payment"
 )
 
@@ -23,10 +25,11 @@ type API struct {
 	auth     *auth.Service
 	payments *payment.Service
 	adminKey string
-	jwt      *auth.JWTManager                                       // may be nil (JWT disabled)
-	oidc     *auth.OIDC                                             // may be nil (OIDC disabled)
-	balance  func(ctx context.Context, userID int64) (int64, error) // may be nil
-	webDir   string                                                 // static merchant portal directory (optional)
+	jwt      *auth.JWTManager                                                               // may be nil (JWT disabled)
+	oidc     *auth.OIDC                                                                     // may be nil (OIDC disabled)
+	balance  func(ctx context.Context, userID int64) (int64, error)                         // may be nil
+	usage    func(ctx context.Context, userID string, days int) ([]billing.UsageDay, error) // may be nil
+	webDir   string                                                                         // static merchant portal directory (optional)
 }
 
 // New builds the portal API.
@@ -52,6 +55,12 @@ func (api *API) WithBalance(fn func(ctx context.Context, userID int64) (int64, e
 	return api
 }
 
+// WithUsage attaches the per-user usage aggregator (PG-backed).
+func (api *API) WithUsage(fn func(ctx context.Context, userID string, days int) ([]billing.UsageDay, error)) *API {
+	api.usage = fn
+	return api
+}
+
 // WithWeb serves the merchant portal static files at /.
 func (api *API) WithWeb(dir string) *API {
 	api.webDir = dir
@@ -74,6 +83,7 @@ func (api *API) Handler() http.Handler {
 		mux.Handle("/api/oidc/callback", api.oidc)
 	}
 	mux.HandleFunc("GET /api/balance", api.balanceHandler)
+	mux.HandleFunc("GET /api/usage", api.usageHandler)
 	if api.webDir != "" {
 		mux.Handle("/", http.FileServer(http.Dir(api.webDir)))
 	}
@@ -139,6 +149,31 @@ func (api *API) balanceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"user_id": uid, "balance_micros": bal})
+}
+
+// usageHandler returns the authenticated user's per-day usage.
+func (api *API) usageHandler(w http.ResponseWriter, r *http.Request) {
+	uid, err := userFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "authenticated user required"})
+		return
+	}
+	if api.usage == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "usage not configured"})
+		return
+	}
+	days := 7
+	if raw := r.URL.Query().Get("days"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			days = v
+		}
+	}
+	rows, err := api.usage(r.Context(), fmt.Sprintf("user-%d", uid), days)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user_id": uid, "days": days, "usage": rows})
 }
 
 // userFromRequest extracts user_id: JWT context first, then query/header.

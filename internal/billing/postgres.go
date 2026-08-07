@@ -324,6 +324,49 @@ func (s *PostgresOrderStore) Replay(ctx context.Context, from, to time.Time, fn 
 	return rows.Err()
 }
 
+// UsageDay is one day's aggregated usage for a user (merchant charts).
+type UsageDay struct {
+	Day          string `json:"day"`
+	Requests     int64  `json:"requests"`
+	PromptTok    int64  `json:"prompt_tokens"`
+	ComplTok     int64  `json:"completion_tokens"`
+	TotalTok     int64  `json:"total_tokens"`
+	AmountMicros int64  `json:"amount_micros"`
+}
+
+// UsageByDay aggregates a user's SETTLED orders per day (last N days)
+// from PostgreSQL — the authoritative bill source (no ClickHouse needed).
+func (s *PostgresOrderStore) UsageByDay(ctx context.Context, userID string, days int) ([]UsageDay, error) {
+	if days <= 0 || days > 90 {
+		days = 7
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT to_char(created_at, 'YYYY-MM-DD') AS day,
+		       count(*),
+		       COALESCE(SUM(prompt_tokens),0),
+		       COALESCE(SUM(completion_tokens),0),
+		       COALESCE(SUM(total_tokens),0),
+		       COALESCE(SUM(amount_micros),0)
+		FROM orders
+		WHERE user_id = $1
+		  AND created_at >= now() - ($2 || ' days')::interval
+		  AND status = 'SETTLED'
+		GROUP BY day ORDER BY day`, userID, fmt.Sprint(days))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UsageDay
+	for rows.Next() {
+		var d UsageDay
+		if err := rows.Scan(&d.Day, &d.Requests, &d.PromptTok, &d.ComplTok, &d.TotalTok, &d.AmountMicros); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 // Close releases the pool.
 func (s *PostgresOrderStore) Close() { s.pool.Close() }
 
