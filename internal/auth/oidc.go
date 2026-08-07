@@ -53,13 +53,18 @@ func NewOIDC(cfg OIDCConfig, auth *Service, jwt *JWTManager, log *slog.Logger) (
 		Endpoint:     provider.Endpoint(),
 		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 	}
+	// Accept RS256 (Google/Azure/Dex) and HS256 (lightweight mock IdPs);
+	// go-oidc validates against the JWKS by default.
 	return &OIDC{
 		cfg:   cfg,
 		auth:  auth,
 		jwt:   jwt,
 		oauth: oauth,
-		verif: provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
-		log:   log,
+		verif: provider.Verifier(&oidc.Config{
+			ClientID:             cfg.ClientID,
+			SupportedSigningAlgs: []string{"RS256", "HS256"},
+		}),
+		log: log,
 	}, nil
 }
 

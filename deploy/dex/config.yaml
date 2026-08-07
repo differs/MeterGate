@@ -1,0 +1,36 @@
+# Dex OIDC IdP for MeterGate production-grade verification.
+# mockCallback connector: login "just works" (no external IdP needed) —
+# the full OIDC code flow is still exercised: discovery, authorize
+# redirect, code exchange, id_token verification via JWKS.
+issuer: http://127.0.0.1:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+connectors:
+  - type: mockCallback
+    id: mock
+    name: Mock User
+
+# local password login (real OIDC code flow: authorize → login → code)
+enablePasswordDB: true
+staticPasswords:
+  - email: "alice@metergate.dev"
+    # bcrypt of "password" (generated with htpasswd -bnBC 10 "" password)
+    hash: "$2b$10$nqtBn6p49DsmGb3n.4y.KOH1EagJe6PYaArcq9B9qkRagLzOVe78K"
+    username: "alice"
+    userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+
+staticClients:
+  - id: metergate
+    redirectURIs:
+      - "http://localhost:3002/api/oidc/callback"
+      - "http://localhost:3202/api/oidc/callback"
+    name: 'MeterGate'
+    secret: dex-secret
+
+oauth2:
+  skipApprovalScreen: true

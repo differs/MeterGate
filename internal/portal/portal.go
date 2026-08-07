@@ -64,6 +64,12 @@ func (api *API) Handler() http.Handler {
 
 func (api *API) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// OIDC endpoints are public: the IdP redirects back WITHOUT our
+		// auth header (browser flow), so /api/oidc/* must bypass.
+		if strings.HasPrefix(r.URL.Path, "/api/oidc/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		// 1) admin key (dev/ops) OR 2) session JWT
 		if api.adminKey != "" && r.Header.Get("Authorization") == "Bearer "+api.adminKey {
 			next.ServeHTTP(w, r)

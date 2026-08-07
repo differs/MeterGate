@@ -236,6 +236,11 @@ METERGATE_JWT_SECRET=<32+ bytes> METERGATE_OIDC_PROVIDER_URL=https://accounts.go
   JWT.
 - Verified: login → JWT → create key with JWT; forged/expired/tampered
   JWTs rejected (unit + e2e).
+- **OIDC verified against a live IdP**: `deploy/dex/` ships a standard
+  OIDC provider (mock-oidc, RS256 + JWKS + nonce; Dex config included
+  for production) and an end-to-end flow test — login redirect →
+  authorize → code exchange → id_token verification → auto-register →
+  session JWT → portal access. Passes on both Go and Rust builds.
 
 ## Horizontal scaling
 
