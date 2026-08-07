@@ -98,6 +98,22 @@ func (r *Router) ChannelHealth(channelID string) (healthy bool, breakerState str
 	return healthy, "unknown"
 }
 
+// Channels returns all known channel IDs (metrics exporter).
+func (r *Router) Channels() []string {
+	snap := r.snap.Load()
+	seen := map[string]struct{}{}
+	for _, route := range snap.Models {
+		for _, c := range route.Channels {
+			seen[c.Channel.ID] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	return out
+}
+
 // --- config loading -------------------------------------------------------
 
 // Config is the routing configuration file shape.

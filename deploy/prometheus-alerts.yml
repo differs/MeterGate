@@ -1,0 +1,91 @@
+# MeterGate SLO alerting rules.
+# Targets:
+#   availability  >= 99.9%  (5xx ratio < 0.1% over 30m)
+#   latency       p99 < 500ms
+#   billing       zero event loss, frozen balance drains to 0
+#   reconciliation within tolerance (万分之五)
+#   event bus     consumer lag drains
+groups:
+  - name: metergate-slo
+    rules:
+      # --- availability SLO (99.9%) ---
+      - alert: MeterGateErrorRateHigh
+        expr: |
+          sum(rate(metergate_http_requests_total{code="5xx"}[5m]))
+            / clamp_min(sum(rate(metergate_http_requests_total[5m])), 1)
+          > 0.001
+        for: 10m
+        labels:
+          severity: critical
+          slo: availability
+        annotations:
+          summary: "5xx ratio above 0.1% (SLO 99.9%)"
+          description: "Error rate {{ $value | humanizePercentage }} over 5m."
+
+      # --- latency SLO (p99 < 500ms) ---
+      - alert: MeterGateLatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(metergate_http_request_duration_seconds_bucket[10m])) by (le))
+          > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          slo: latency
+        annotations:
+          summary: "p99 latency above 500ms"
+          description: "p99 = {{ $value | humanizeDuration }}."
+
+      # --- billing integrity: event loss is a money-integrity risk ---
+      - alert: MeterGateEventDrops
+        expr: increase(metergate_sink_dropped_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          slo: billing
+        annotations:
+          summary: "Metering events dropped (buffer overflow)"
+          description: "Dropped events = money-integrity risk; check sink capacity."
+
+      # --- frozen balance must drain (leaked pre-charges) ---
+      - alert: MeterGateFrozenBalanceLeak
+        expr: metergate_frozen_balance_micros > 1000000
+        for: 30m
+        labels:
+          severity: warning
+          slo: billing
+        annotations:
+          summary: "Frozen (unsettled pre-charge) balance not draining"
+          description: "{{ $value }} micros frozen; possible pre-charge leak."
+
+      # --- event bus: consumer lag must drain ---
+      - alert: MeterGateKafkaLag
+        expr: metergate_kafka_consumer_lag > 100000
+        for: 15m
+        labels:
+          severity: warning
+          slo: event_bus
+        annotations:
+          summary: "Kafka consumer lag above 100k"
+          description: "Lag = {{ $value }}; billing falling behind."
+
+      # --- reconciliation must stay within tolerance ---
+      - alert: MeterGateReconOutOfTolerance
+        expr: metergate_recon_within_tolerance == 0
+        for: 30m
+        labels:
+          severity: critical
+          slo: reconciliation
+        annotations:
+          summary: "Reconciliation outside tolerance"
+          description: "Last reconcile run found differences beyond 万分之五."
+
+      # --- routing: a channel stuck open is an availability risk ---
+      - alert: MeterGateChannelOpen
+        expr: metergate_channel_breaker_state == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker open for a channel"
+          description: "Channel {{ $labels.channel }} fast-failing."

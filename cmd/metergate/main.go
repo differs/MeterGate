@@ -54,6 +54,7 @@ import (
 	"github.com/differs/MeterGate/internal/gateway"
 	"github.com/differs/MeterGate/internal/ledger"
 	"github.com/differs/MeterGate/internal/metering"
+	"github.com/differs/MeterGate/internal/obs"
 	"github.com/differs/MeterGate/internal/reconciliation"
 	"github.com/differs/MeterGate/internal/router"
 	"github.com/differs/MeterGate/pkg/openai"
@@ -103,6 +104,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// --- observability ---
+	metrics := obs.New()
+
 	// --- billing stack (optional) ---
 	var (
 		precharger *billing.Precharger
@@ -133,14 +137,17 @@ func main() {
 		}
 	}
 
+	if precharger != nil {
+		precharger.WithMetrics(metrics)
+	}
 	if precharger != nil && store != nil {
-		settler := billing.NewSettler(store, precharger, logger, 500)
-		sink = billing.NewSink(ctx, settler, logger, 10_000)
+		settler := billing.NewSettler(store, precharger, logger, 500).WithMetrics(metrics)
+		sink = billing.NewSink(ctx, settler, logger, 10_000).WithMetrics(metrics)
 		defer sink.Close()
 		logger.Info("dual-track billing enabled (pre-charge + batched settle)")
 	} else if store != nil {
-		settler := billing.NewSettler(store, nil, logger, 500)
-		sink = billing.NewSink(ctx, settler, logger, 10_000)
+		settler := billing.NewSettler(store, nil, logger, 500).WithMetrics(metrics)
+		sink = billing.NewSink(ctx, settler, logger, 10_000).WithMetrics(metrics)
 		defer sink.Close()
 		logger.Info("billing enabled (batched settle only, no pre-charge)")
 	}
@@ -210,6 +217,7 @@ func main() {
 			p := billing.PriceFor(model)
 			return p.InputPer1M, p.OutputPer1M, true
 		}),
+		gateway.WithMetrics(metrics),
 	}
 	if precharger != nil {
 		opts = append(opts, gateway.WithPreCharge(func(ctx context.Context, userID, requestID, model string, promptTokens int64, maxTokens *int64) error {

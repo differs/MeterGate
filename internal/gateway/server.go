@@ -10,11 +10,15 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/differs/MeterGate/internal/metering"
+	"github.com/differs/MeterGate/internal/obs"
 	"github.com/differs/MeterGate/pkg/openai"
 )
 
@@ -80,6 +84,7 @@ type Server struct {
 	preCharge PreChargeFunc     // optional billing fast path (M2+)
 	resolver  ModelResolver     // optional model resolution ("auto")
 	priceSnap PriceSnapshotFunc // optional request-start price freeze
+	metrics   *obs.Metrics      // optional Prometheus metrics
 	log       *slog.Logger
 	httpSrv   *http.Server
 	now       func() time.Time
@@ -97,6 +102,11 @@ func WithKeys(keys []string) Option {
 			s.keys[k] = true
 		}
 	}
+}
+
+// WithMetrics attaches Prometheus metrics instrumentation.
+func WithMetrics(m *obs.Metrics) Option {
+	return func(s *Server) { s.metrics = m }
 }
 
 // WithPriceSnapshot attaches the request-start price freeze.
@@ -145,15 +155,50 @@ func NewServer(upstream Upstream, opts ...Option) *Server {
 	return s
 }
 
+// instrument wraps the mux with request metrics (SLO: error rate, p99).
+func (s *Server) instrument(next http.Handler) http.Handler {
+	if s.metrics == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: 200}
+		next.ServeHTTP(rec, r)
+		code := rec.status
+		class := fmt.Sprintf("%dxx", code/100)
+		s.metrics.HTTPRequestsTotal.WithLabelValues(r.URL.Path, r.Method, class).Inc()
+		s.metrics.HTTPRequestDuration.WithLabelValues(r.URL.Path).Observe(time.Since(start).Seconds())
+	})
+}
+
+// statusRecorder captures the response status for metrics.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
 // Handler returns the HTTP handler (routes registered).
+// Public paths (/healthz, /metrics) bypass auth; the API surface is
+// auth-wrapped and instrumented.
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	api := http.NewServeMux()
+	api.HandleFunc("POST /v1/chat/completions", s.handleChat)
+
+	public := http.NewServeMux()
+	public.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	return s.authMiddleware(mux)
+	if s.metrics != nil {
+		public.Handle("/metrics", promhttp.Handler())
+	}
+	public.Handle("/", s.instrument(s.authMiddleware(api)))
+	return public
 }
 
 // ListenAndServe starts the gateway until ctx is cancelled.

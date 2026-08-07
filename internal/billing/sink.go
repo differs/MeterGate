@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/differs/MeterGate/internal/metering"
+	"github.com/differs/MeterGate/internal/obs"
 )
 
 // Sink is a metering.Sink backed by an in-process channel feeding the
@@ -19,7 +20,8 @@ type Sink struct {
 	ch      chan metering.Event
 	settler *Settler
 	log     *slog.Logger
-	dropped chan int64 // receives drop counters for tests/observability
+	metrics *obs.Metrics // optional
+	dropped chan int64   // receives drop counters for tests/observability
 	cancel  context.CancelFunc
 	done    chan struct{}
 }
@@ -75,12 +77,21 @@ func (s *Sink) handle(ev metering.Event) {
 	}
 }
 
+// WithMetrics attaches Prometheus instrumentation.
+func (s *Sink) WithMetrics(m *obs.Metrics) *Sink {
+	s.metrics = m
+	return s
+}
+
 // Emit implements metering.Sink. Non-blocking; drops on full buffer.
 func (s *Sink) Emit(ev metering.Event) error {
 	select {
 	case s.ch <- ev:
 		return nil
 	default:
+		if s.metrics != nil {
+			s.metrics.SinkDroppedTotal.Inc()
+		}
 		s.log.Warn("metering sink buffer full, event dropped", "request_id", ev.RequestID)
 		return nil
 	}

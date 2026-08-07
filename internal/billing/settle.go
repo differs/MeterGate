@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/differs/MeterGate/internal/metering"
+	"github.com/differs/MeterGate/internal/obs"
 )
 
 // Settler consumes request-level metering events and persists terminal
@@ -33,6 +34,7 @@ type Settler struct {
 	maxWait time.Duration
 	shards  []*settleShard
 	wg      sync.WaitGroup
+	metrics *obs.Metrics // optional
 }
 
 type settleShard struct {
@@ -77,6 +79,12 @@ func NewSettler(store OrderStore, pre *Precharger, log *slog.Logger, batch int) 
 		s.wg.Add(1)
 		go s.flushLoop(sh)
 	}
+	return s
+}
+
+// WithMetrics attaches Prometheus instrumentation.
+func (s *Settler) WithMetrics(m *obs.Metrics) *Settler {
+	s.metrics = m
 	return s
 }
 

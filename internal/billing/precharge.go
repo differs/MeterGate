@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/differs/MeterGate/internal/obs"
 )
 
 // ErrInsufficientBalance is returned by PreCharge when the user balance
@@ -77,12 +80,19 @@ var SettleScript = redis.NewScript(settleScriptSrc)
 
 // Precharger runs the fast-path balance guard.
 type Precharger struct {
-	rdb *redis.Client
+	rdb     *redis.Client
+	metrics *obs.Metrics // optional
 }
 
 // NewPrecharger builds a Precharger.
 func NewPrecharger(rdb *redis.Client) *Precharger {
 	return &Precharger{rdb: rdb}
+}
+
+// WithMetrics attaches Prometheus instrumentation.
+func (p *Precharger) WithMetrics(m *obs.Metrics) *Precharger {
+	p.metrics = m
+	return p
 }
 
 // PreCharge reserves an estimate for a request. TTL ensures a crashed
@@ -91,15 +101,28 @@ func (p *Precharger) PreCharge(ctx context.Context, userID, requestID string, am
 	if amountMicros <= 0 {
 		return nil
 	}
+	if p.metrics != nil {
+		timer := prometheus.NewTimer(p.metrics.PrechargeDuration)
+		defer timer.ObserveDuration()
+	}
 	res, err := PreChargeScript.Run(ctx, p.rdb,
 		[]string{balKey(userID), frozenKey(userID), preKey(requestID)},
 		amountMicros, int64(prechargeTTL.Seconds()),
 	).Int64()
 	if err != nil {
+		if p.metrics != nil {
+			p.metrics.PrechargeTotal.WithLabelValues("error").Inc()
+		}
 		return fmt.Errorf("precharge script: %w", err)
 	}
 	if res < 0 {
+		if p.metrics != nil {
+			p.metrics.PrechargeTotal.WithLabelValues("insufficient").Inc()
+		}
 		return ErrInsufficientBalance
+	}
+	if p.metrics != nil {
+		p.metrics.PrechargeTotal.WithLabelValues("ok").Inc()
 	}
 	return nil
 }
