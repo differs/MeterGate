@@ -46,3 +46,12 @@ CREATE TABLE IF NOT EXISTS payments (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (channel, channel_txn_id)       -- replay-safe callback
 );
+
+-- OIDC identity linking (subject → local user)
+CREATE TABLE IF NOT EXISTS external_identities (
+    provider TEXT NOT NULL,
+    subject  TEXT NOT NULL,
+    user_id  BIGINT NOT NULL REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider, subject)
+);

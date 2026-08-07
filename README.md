@@ -221,6 +221,22 @@ Verified end-to-end: register → login → key → recharge → mock pay →
 consume with the new key → balance exact; duplicate recharge (same
 idempotency_key) and duplicate callback both no-op (money safe).
 
+## Sessions (JWT + OIDC)
+
+```bash
+METERGATE_JWT_SECRET=<32+ bytes> METERGATE_OIDC_PROVIDER_URL=https://accounts.google.com METERGATE_OIDC_CLIENT_ID=... METERGATE_OIDC_CLIENT_SECRET=... ./metergate
+```
+
+- Login returns a session JWT (HS256, 24h); portal endpoints accept the
+  JWT OR the admin key (dev).
+- `GET /api/oidc/login` → redirect to the IdP (state CSRF cookie);
+  `/api/oidc/callback` exchanges the code, verifies the id_token
+  (issuer/audience/signature via JWKS), auto-registers the local
+  account (external_identities subject linking) and returns a session
+  JWT.
+- Verified: login → JWT → create key with JWT; forged/expired/tampered
+  JWTs rejected (unit + e2e).
+
 ## Horizontal scaling
 
 Verified (1/2/4 instances, per-core efficiency constant) and documented:

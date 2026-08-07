@@ -240,6 +240,31 @@ func main() {
 			paySvc.RegisterChannel(payment.MockChannel{})
 
 			portalAPI := portal.New(authSvc, paySvc, adminKey)
+
+			// JWT sessions (HS256; secret from env, >= 32 bytes)
+			if jwtSecret := envOr("METERGATE_JWT_SECRET", ""); jwtSecret != "" {
+				portalAPI.WithJWT(auth.NewJWTManager(jwtSecret))
+				logger.Info("session JWT enabled")
+			}
+
+			// OIDC (authorization-code flow; auto-register on first login)
+			if oidcURL := envOr("METERGATE_OIDC_PROVIDER_URL", ""); oidcURL != "" {
+				oidcCfg := auth.OIDCConfig{
+					ProviderURL:  oidcURL,
+					ClientID:     envOr("METERGATE_OIDC_CLIENT_ID", ""),
+					ClientSecret: envOr("METERGATE_OIDC_CLIENT_SECRET", ""),
+					RedirectURL:  envOr("METERGATE_OIDC_REDIRECT_URL", "http://localhost:3002/api/oidc/callback"),
+					AutoRegister: true,
+				}
+				oidcSvc, err := auth.NewOIDC(oidcCfg, authSvc, auth.NewJWTManager(envOr("METERGATE_JWT_SECRET", "metergate-dev-secret-change-me-please-32")), logger)
+				if err != nil {
+					logger.Error("oidc init failed", "err", err)
+				} else {
+					portalAPI.WithOIDC(oidcSvc)
+					logger.Info("oidc enabled", "provider", oidcURL)
+				}
+			}
+
 			go func() {
 				portalSrv := &http.Server{Addr: ":" + envOr("METERGATE_PORTAL_PORT", "3002"), Handler: portalAPI.Handler()}
 				logger.Info("portal API listening", "addr", portalSrv.Addr)

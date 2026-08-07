@@ -3,6 +3,7 @@
 package portal
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -13,16 +14,34 @@ import (
 	"github.com/differs/MeterGate/internal/payment"
 )
 
+type ctxKey int
+
+const ctxKeyUserID ctxKey = iota
+
 // API is the portal HTTP surface.
 type API struct {
 	auth     *auth.Service
 	payments *payment.Service
 	adminKey string
+	jwt      *auth.JWTManager // may be nil (JWT disabled)
+	oidc     *auth.OIDC       // may be nil (OIDC disabled)
 }
 
 // New builds the portal API.
 func New(a *auth.Service, p *payment.Service, adminKey string) *API {
 	return &API{auth: a, payments: p, adminKey: adminKey}
+}
+
+// WithJWT enables session JWT issuance on login.
+func (api *API) WithJWT(m *auth.JWTManager) *API {
+	api.jwt = m
+	return api
+}
+
+// WithOIDC mounts the OIDC login/callback endpoints.
+func (api *API) WithOIDC(o *auth.OIDC) *API {
+	api.oidc = o
+	return api
 }
 
 // Handler returns the portal router (admin-key protected in dev;
@@ -36,16 +55,34 @@ func (api *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/recharge", api.recharge)
 	mux.HandleFunc("POST /api/recharge/pay", api.payHandler)
 	mux.HandleFunc("GET /api/recharge/status", api.rechargeStatus)
-	return api.adminAuth(mux)
+	if api.oidc != nil {
+		mux.Handle("/api/oidc/login", api.oidc)
+		mux.Handle("/api/oidc/callback", api.oidc)
+	}
+	return api.authMiddleware(mux)
 }
 
-func (api *API) adminAuth(next http.Handler) http.Handler {
+func (api *API) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if api.adminKey == "" || r.Header.Get("Authorization") != "Bearer "+api.adminKey {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		// 1) admin key (dev/ops) OR 2) session JWT
+		if api.adminKey != "" && r.Header.Get("Authorization") == "Bearer "+api.adminKey {
+			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		if api.jwt != nil {
+			raw := r.Header.Get("Authorization")
+			raw = strings.TrimPrefix(raw, "Bearer ")
+			raw = strings.TrimSpace(raw)
+			if raw != "" {
+				if claims, err := api.jwt.Verify(raw); err == nil {
+					ctx := context.WithValue(r.Context(), ctxKeyUserID, claims.UserID)
+					r = r.WithContext(ctx)
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 	})
 }
 
@@ -55,8 +92,11 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// userFromRequest extracts user_id from query/header (dev: admin-driven).
+// userFromRequest extracts user_id: JWT context first, then query/header.
 func userFromRequest(r *http.Request) (int64, error) {
+	if v, ok := r.Context().Value(ctxKeyUserID).(int64); ok {
+		return v, nil
+	}
 	raw := r.URL.Query().Get("user_id")
 	if raw == "" {
 		raw = r.Header.Get("X-User-Id")
@@ -99,8 +139,20 @@ func (api *API) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": err.Error()})
 		return
 	}
-	token, _ := auth.SessionToken(u.ID)
-	writeJSON(w, http.StatusOK, map[string]any{"user_id": u.ID, "token": token})
+	resp := map[string]any{"user_id": u.ID}
+	if api.jwt != nil {
+		token, err := api.jwt.Sign(u.ID, u.Username)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "jwt sign failed"})
+			return
+		}
+		resp["token"] = token
+		resp["token_type"] = "Bearer"
+	} else {
+		token, _ := auth.SessionToken(u.ID)
+		resp["token"] = token
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (api *API) createKey(w http.ResponseWriter, r *http.Request) {

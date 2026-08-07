@@ -53,6 +53,21 @@ func (s *Service) Pool() *pgxpool.Pool {
 	return s.pool
 }
 
+// LoginVerified bypasses the password check (internal use: OIDC users).
+func (s *Service) LoginVerified(ctx context.Context, username string) (*User, error) {
+	var u User
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, username, status FROM users WHERE username=$1`,
+		username).Scan(&u.ID, &u.Username, &u.Status)
+	if err != nil {
+		return nil, ErrBadCredentials
+	}
+	if u.Status != 1 {
+		return nil, ErrUserDisabled
+	}
+	return &u, nil
+}
+
 // NewService connects and applies the schema.
 func NewService(ctx context.Context, dsn string) (*Service, error) {
 	pool, err := pgxpool.New(ctx, dsn)
