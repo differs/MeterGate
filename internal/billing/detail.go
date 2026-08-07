@@ -107,10 +107,11 @@ SETTINGS index_granularity = 8192`
 func (s *DetailSink) Emit(ev metering.Event) error {
 	p := PriceFor(ev.Model)
 	completion := int64(ev.CompletionTokens)
-	if ev.Status == metering.StatusFailed {
-		completion = 0 // zero-completion insurance
-	}
 	amount := CalculateAmount(int64(ev.PromptTokens), completion, p)
+	if ev.Status == metering.StatusFailed {
+		completion = 0
+		amount = 0 // zero-completion insurance: failed requests are free
+	}
 	row := DetailRow{
 		RequestID:        ev.RequestID,
 		UserID:           ev.UserID,

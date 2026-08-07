@@ -31,7 +31,7 @@ type Settler struct {
 	buf     []Order
 	pending []metering.Event // events whose orders are in buf (for settle)
 	flushAt time.Time
-	flushed chan struct{} // closed by the flusher when idle; used for Close
+	trigger chan struct{} // buffered(1): async flush signal — Handle never blocks
 	done    chan struct{}
 	wg      sync.WaitGroup
 }
@@ -51,6 +51,7 @@ func NewSettler(store OrderStore, pre *Precharger, log *slog.Logger, batch int) 
 		log:     log,
 		batch:   batch,
 		maxWait: 50 * time.Millisecond,
+		trigger: make(chan struct{}, 1),
 		done:    make(chan struct{}),
 	}
 	s.wg.Add(1)
@@ -73,19 +74,30 @@ func (s *Settler) Handle(ctx context.Context, ev metering.Event) error {
 	s.mu.Lock()
 	s.buf = append(s.buf, *o)
 	s.pending = append(s.pending, ev)
-	flush := len(s.buf) >= s.batch
-	if !flush && s.flushAt.IsZero() {
+	full := len(s.buf) >= s.batch
+	if !full && s.flushAt.IsZero() {
 		s.flushAt = time.Now().Add(s.maxWait)
 	}
 	s.mu.Unlock()
 
-	if flush {
-		s.flush()
+	if full {
+		s.signalFlush()
 	}
 	return nil
 }
 
-// flushLoop periodically flushes partial batches on the maxWait deadline.
+// signalFlush wakes the single flusher goroutine without blocking the
+// caller (the hot path never waits on billing I/O).
+func (s *Settler) signalFlush() {
+	select {
+	case s.trigger <- struct{}{}:
+	default: // already pending
+	}
+}
+
+// flushLoop is the single flusher: triggered by batch-full signals and by
+// the maxWait deadline for partial batches. All PG/Redis I/O happens here,
+// off the event-consumption path.
 func (s *Settler) flushLoop() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(s.maxWait)
@@ -94,6 +106,8 @@ func (s *Settler) flushLoop() {
 		select {
 		case <-s.done:
 			return
+		case <-s.trigger:
+			s.flush()
 		case <-ticker.C:
 			s.mu.Lock()
 			due := !s.flushAt.IsZero() && time.Now().After(s.flushAt)
@@ -127,17 +141,17 @@ func (s *Settler) flush() {
 			"count", len(orders), "err", err)
 		return
 	}
-	for i, ev := range events {
-		if s.pre != nil {
+	if s.pre != nil {
+		settles := make([]SettleReq, len(events))
+		for i, ev := range events {
 			charged := orders[i].AmountMicros
 			if orders[i].Status == StatusNoCharge {
 				charged = 0
 			}
-			if err := s.pre.Settle(ctx, ev.UserID, ev.RequestID, charged); err != nil {
-				s.log.Warn("precharge settle failed (swept by reconcile)",
-					"request_id", ev.RequestID, "err", err)
-			}
+			settles[i] = SettleReq{UserID: ev.UserID, RequestID: ev.RequestID, ChargedMicros: charged}
 		}
+		// One Redis round-trip for the whole batch (pipeline).
+		s.pre.BatchSettle(ctx, settles)
 	}
 	s.log.Debug("batch settled", "count", len(orders))
 }
@@ -150,16 +164,18 @@ func (s *Settler) Close() {
 }
 
 // orderFromEvent converts a metering event to a terminal order.
-// Failed requests (zero-completion insurance) become NO_CHARGE orders.
+// Failed requests (zero-completion insurance) become NO_CHARGE orders
+// with amount 0 — the user pays nothing for requests that never produced
+// output, not even the prompt tokens.
 func orderFromEvent(ev metering.Event) *Order {
 	status := StatusSettled
 	completion := int64(ev.CompletionTokens)
+	amount := CalculateAmount(int64(ev.PromptTokens), completion, PriceFor(ev.Model))
 	if ev.Status == metering.StatusFailed {
 		status = StatusNoCharge
 		completion = 0
+		amount = 0 // zero-completion insurance: failed requests are free
 	}
-	p := PriceFor(ev.Model)
-	amount := CalculateAmount(int64(ev.PromptTokens), completion, p)
 	return &Order{
 		RequestID:        ev.RequestID,
 		UserID:           ev.UserID,

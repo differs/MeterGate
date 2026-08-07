@@ -1,0 +1,12 @@
+<!-- ClickHouse user config: allow network access from any host.
+     The stock image only allows loopback, which breaks docker port
+     mapping. -->
+<clickhouse>
+  <users>
+    <default>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+    </default>
+  </users>
+</clickhouse>

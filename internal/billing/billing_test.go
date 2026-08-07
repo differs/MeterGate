@@ -83,6 +83,33 @@ func TestPreChargeInsufficient(t *testing.T) {
 	}
 }
 
+// TestPreChargeClawback: when the actual charge EXCEEDS the pre-charge
+// estimate (long streaming responses), the shortfall is deducted from the
+// balance — the user must never pay less than the metered amount.
+func TestPreChargeClawback(t *testing.T) {
+	mr, rdb := newTestRedis(t)
+	defer mr.Close()
+	pre := NewPrecharger(rdb)
+	ctx := context.Background()
+
+	if err := pre.TopUp(ctx, "u1", 1_000_000); err != nil {
+		t.Fatal(err)
+	}
+	if err := pre.PreCharge(ctx, "u1", "req-1", 200); err != nil {
+		t.Fatal(err)
+	}
+	// charge 5000 >> pre-charge 200
+	if err := pre.Settle(ctx, "u1", "req-1", 5000); err != nil {
+		t.Fatal(err)
+	}
+	if bal, _ := pre.Balance(ctx, "u1"); bal != 1_000_000-5000 {
+		t.Fatalf("balance = %d, want %d (shortfall must be clawed back)", bal, 1_000_000-5000)
+	}
+	if fr, _ := pre.FrozenBalance(ctx); fr != 0 {
+		t.Fatalf("frozen = %d, want 0", fr)
+	}
+}
+
 func TestPreChargeNoChargeFullRelease(t *testing.T) {
 	mr, rdb := newTestRedis(t)
 	defer mr.Close()

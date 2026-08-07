@@ -25,10 +25,10 @@ type Sink struct {
 }
 
 // NewSink starts a background consumer goroutine.
-// buffer: event queue depth (default 10_000).
+// buffer: event queue depth (default 100_000; each event ~300B).
 func NewSink(ctx context.Context, settler *Settler, log *slog.Logger, buffer int) *Sink {
 	if buffer <= 0 {
-		buffer = 10_000
+		buffer = 500_000
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	s := &Sink{
@@ -44,26 +44,27 @@ func NewSink(ctx context.Context, settler *Settler, log *slog.Logger, buffer int
 }
 
 func (s *Sink) loop(ctx context.Context) {
-	defer close(s.done)
-	var drops int64
 	for {
 		select {
 		case <-ctx.Done():
-			// Drain remaining events on shutdown (best effort).
-			for {
-				select {
-				case ev := <-s.ch:
-					s.handle(ev)
-				default:
-					select {
-					case s.dropped <- drops:
-					default:
-					}
-					return
-				}
-			}
+			return
 		case ev := <-s.ch:
 			s.handle(ev)
+		}
+	}
+}
+
+// Close stops the consumers and drains remaining events (best effort).
+func (s *Sink) Close() {
+	s.cancel()
+	// drain leftovers
+	for {
+		select {
+		case ev := <-s.ch:
+			s.handle(ev)
+		default:
+			close(s.done)
+			return
 		}
 	}
 }
@@ -83,12 +84,6 @@ func (s *Sink) Emit(ev metering.Event) error {
 		s.log.Warn("metering sink buffer full, event dropped", "request_id", ev.RequestID)
 		return nil
 	}
-}
-
-// Close stops the consumer and waits for the drain.
-func (s *Sink) Close() {
-	s.cancel()
-	<-s.done
 }
 
 var _ metering.Sink = (*Sink)(nil)

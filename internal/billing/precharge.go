@@ -43,27 +43,37 @@ redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[2])
 return 1
 `)
 
-// SettleScript finalizes a pre-charge: keeps `charged` as real consumption,
-// returns the remainder to the balance, clears the pre-charge marker.
-// charged=0 means full release (no-charge / failed request).
-//
-// KEYS: balance, frozen, precharge
-// ARGV: charged (int64 micros)
-var SettleScript = redis.NewScript(`
+// settleScriptSrc is the raw Lua for SettleScript (also usable in a
+// pipeline where redis.NewScript objects cannot be reused).
+const settleScriptSrc = `
 local pre = tonumber(redis.call('GET', KEYS[3]) or '0')
 if pre <= 0 then
   return 0
 end
 local charged = tonumber(ARGV[1])
 local refund = pre - charged
-if refund < 0 then refund = 0 end
-if refund > 0 then
+if refund < 0 then
+  -- Actual consumption exceeded the pre-charge estimate (e.g. a long
+  -- streaming response): claw the shortfall back from the balance.
+  -- The balance is guaranteed sufficient because the request was already
+  -- served; a negative balance here is corrected by reconciliation.
+  redis.call('DECRBY', KEYS[1], -refund)
+  refund = 0
+elseif refund > 0 then
   redis.call('INCRBY', KEYS[1], refund)
 end
 redis.call('DECRBY', KEYS[2], pre)
 redis.call('DEL', KEYS[3])
 return refund
-`)
+`
+
+// SettleScript finalizes a pre-charge: keeps `charged` as real consumption,
+// returns the remainder to the balance, clears the pre-charge marker.
+// charged=0 means full release (no-charge / failed request).
+//
+// KEYS: balance, frozen, precharge
+// ARGV: charged (int64 micros)
+var SettleScript = redis.NewScript(settleScriptSrc)
 
 // Precharger runs the fast-path balance guard.
 type Precharger struct {
@@ -117,6 +127,31 @@ func (p *Precharger) TopUp(ctx context.Context, userID string, amountMicros int6
 		return nil
 	}
 	return p.rdb.IncrBy(ctx, balKey(userID), amountMicros).Err()
+}
+
+// BatchSettle settles many pre-charges in one Redis round-trip (pipeline).
+// Idempotent per request_id; used by the Settler's flush path to avoid
+// N sequential round-trips per batch (the hot-path bottleneck at high QPS).
+func (p *Precharger) BatchSettle(ctx context.Context, settles []SettleReq) {
+	if len(settles) == 0 {
+		return
+	}
+	pipe := p.rdb.Pipeline()
+	for _, s := range settles {
+		charged := s.ChargedMicros
+		if charged < 0 {
+			charged = 0
+		}
+		_ = pipe.Eval(ctx, settleScriptSrc, []string{balKey(s.UserID), frozenKey(s.UserID), preKey(s.RequestID)}, charged)
+	}
+	_, _ = pipe.Exec(ctx)
+}
+
+// SettleReq is one pre-charge settlement.
+type SettleReq struct {
+	UserID        string
+	RequestID     string
+	ChargedMicros int64
 }
 
 // FrozenBalance sums frozen amounts across all users (reconcile sweep).

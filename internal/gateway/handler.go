@@ -73,6 +73,17 @@ func (s *Server) handleNonStream(ctx context.Context, w http.ResponseWriter, cal
 	start := s.now()
 	result, err := s.upstream.Chat(ctx, call)
 	if err != nil {
+		// Emit a failed event: audit trail + zero-completion insurance
+		// (the Settler records a NO_CHARGE order for it).
+		s.emit(metering.Event{
+			RequestID:    call.RequestID,
+			UserID:       call.UserID,
+			Model:        call.Model,
+			Provider:     providerOf(call),
+			Status:       metering.StatusFailed,
+			PromptTokens: promptTokens,
+			DurationMs:   s.now().Sub(start).Milliseconds(),
+		})
 		writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
