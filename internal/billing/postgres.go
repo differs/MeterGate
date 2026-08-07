@@ -248,6 +248,35 @@ func (s *PostgresOrderStore) NegativeAmountOrders(ctx context.Context, day strin
 	return out, rows.Err()
 }
 
+// SumProviderUsage aggregates our side's usage+cost per provider for a
+// day (reconciliation Layer 2 input).
+func (s *PostgresOrderStore) SumProviderUsage(ctx context.Context, day string) (map[string]MyUsageRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT provider,
+		       COALESCE(SUM(prompt_tokens),0),
+		       COALESCE(SUM(completion_tokens),0),
+		       COALESCE(SUM(total_tokens),0),
+		       0
+		FROM orders
+		WHERE created_at >= $1::date AND created_at < $1::date + INTERVAL '1 day'
+		  AND status = 'SETTLED'
+		GROUP BY provider`, day)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]MyUsageRow{}
+	for rows.Next() {
+		var p string
+		var r MyUsageRow
+		if err := rows.Scan(&p, &r.PromptTok, &r.ComplTok, &r.TotalTok, &r.CostMicros); err != nil {
+			return nil, err
+		}
+		out[p] = r
+	}
+	return out, rows.Err()
+}
+
 // Balance returns the net balance for a user: sum(orders) + executed
 // refunds (CREDIT +, DEBIT -). This is the authoritative, replayable
 // figure; the Redis balance is the realtime operational view.

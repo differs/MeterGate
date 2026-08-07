@@ -25,8 +25,10 @@ func TestRoutingUpstreamFailover(t *testing.T) {
 	}))
 	defer ok.Close()
 
-	chA := &Channel{ID: "a", BaseURL: sick.URL, Key: "k", OutputPer1M: 1_000_000}
-	chB := &Channel{ID: "b", BaseURL: ok.URL, Key: "k", OutputPer1M: 2_000_000}
+	// price gap 100x → weighted pick ALWAYS chooses A (failover must then
+	// kick in deterministically; a narrow gap makes this test flaky).
+	chA := &Channel{ID: "a", BaseURL: sick.URL, Key: "k", OutputPer1M: 100_000}
+	chB := &Channel{ID: "b", BaseURL: ok.URL, Key: "k", OutputPer1M: 10_000_000}
 	snap := &Snapshot{Version: 1, Models: map[string]*ModelRoute{
 		"m": mkRoute("m", chA, chB),
 	}}

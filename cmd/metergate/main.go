@@ -40,21 +40,27 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
 	"github.com/differs/MeterGate/internal/admin"
+	"github.com/differs/MeterGate/internal/auth"
 	"github.com/differs/MeterGate/internal/billing"
 	"github.com/differs/MeterGate/internal/gateway"
 	"github.com/differs/MeterGate/internal/ledger"
 	"github.com/differs/MeterGate/internal/metering"
 	"github.com/differs/MeterGate/internal/obs"
+	"github.com/differs/MeterGate/internal/payment"
+	"github.com/differs/MeterGate/internal/portal"
 	"github.com/differs/MeterGate/internal/reconciliation"
 	"github.com/differs/MeterGate/internal/router"
 	"github.com/differs/MeterGate/pkg/openai"
@@ -86,6 +92,7 @@ func main() {
 	configPath := envOr("METERGATE_CONFIG", "")
 	redisAddr := envOr("METERGATE_REDIS_ADDR", "")
 	pgDSN := envOr("METERGATE_PG_DSN", "")
+	pgShards := envOr("METERGATE_PG_SHARDS", "")
 	adminPort := envOr("METERGATE_ADMIN_PORT", "")
 	adminKey := envOr("METERGATE_ADMIN_KEY", "")
 	kafkaBrokers := splitKeys(envOr("METERGATE_KAFKA", ""))
@@ -107,10 +114,15 @@ func main() {
 	// --- observability ---
 	metrics := obs.New()
 
-	// --- billing stack (optional) ---
+	// store is the billing store: orders + refunds (PostgresOrderStore or
+	// ShardedStore both satisfy it).
+	type billingStore interface {
+		billing.OrderStore
+		billing.RefundStore
+	}
 	var (
 		precharger *billing.Precharger
-		store      *billing.PostgresOrderStore
+		store      billingStore
 		sink       *billing.Sink
 	)
 
@@ -135,6 +147,30 @@ func main() {
 			defer adapter.Close()
 			logger.Info("order storage enabled (ledger: postgres)")
 		}
+	} else if pgShards != "" {
+		// Sharded mode: METERGATE_PG_SHARDS=4 + METERGATE_PG_DSN_0..3
+		n, err := strconv.Atoi(pgShards)
+		if err != nil || n < 2 {
+			logger.Error("METERGATE_PG_SHARDS must be an integer >= 2", "value", pgShards)
+			os.Exit(1)
+		}
+		shards := make([]billing.ShardStore, 0, n)
+		for i := 0; i < n; i++ {
+			dsn := os.Getenv(fmt.Sprintf("METERGATE_PG_DSN_%d", i))
+			if dsn == "" {
+				logger.Error("METERGATE_PG_DSN_" + strconv.Itoa(i) + " required in sharded mode")
+				os.Exit(1)
+			}
+			adapter, err := ledger.NewPostgresAdapter(ctx, dsn)
+			if err != nil {
+				logger.Error("shard connect failed", "shard", i, "err", err)
+				os.Exit(1)
+			}
+			shards = append(shards, adapter.PostgresOrderStore)
+		}
+		sharded := billing.NewShardedStore(shards)
+		store = sharded
+		logger.Info("sharded order storage enabled", "shards", n)
 	}
 
 	if precharger != nil {
@@ -186,6 +222,35 @@ func main() {
 		}
 	}
 
+	// --- P0 commercial: auth + payment + portal (requires PG) ---
+	var keyStore *auth.CachedKeyStore
+	if pgDSN != "" {
+		authSvc, err := auth.NewService(ctx, pgDSN)
+		if err != nil {
+			logger.Error("auth service failed, portal disabled", "err", err)
+		} else {
+			keyStore = auth.NewCachedKeyStore(authSvc.NewKeyStore(), 60*time.Second)
+
+			paySvc := payment.NewService(authSvc.Pool(), func(ctx context.Context, userID int64, amount int64) error {
+				if precharger == nil {
+					return fmt.Errorf("precharger disabled (no redis)")
+				}
+				return precharger.TopUp(ctx, "user-"+fmt.Sprint(userID), amount)
+			})
+			paySvc.RegisterChannel(payment.MockChannel{})
+
+			portalAPI := portal.New(authSvc, paySvc, adminKey)
+			go func() {
+				portalSrv := &http.Server{Addr: ":" + envOr("METERGATE_PORTAL_PORT", "3002"), Handler: portalAPI.Handler()}
+				logger.Info("portal API listening", "addr", portalSrv.Addr)
+				if err := portalSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					logger.Error("portal server failed", "err", err)
+				}
+			}()
+			logger.Info("commercial stack enabled (users/keys/recharge/pay)")
+		}
+	}
+
 	// --- admin API (optional) ---
 	if adminPort != "" && store != nil {
 		if adminKey == "" {
@@ -218,6 +283,16 @@ func main() {
 			return p.InputPer1M, p.OutputPer1M, true
 		}),
 		gateway.WithMetrics(metrics),
+	}
+	if keyStore != nil {
+		opts = append(opts, gateway.WithKeyResolver(func(raw string) (string, bool) {
+			uid, err := keyStore.Resolve(context.Background(), raw)
+			if err != nil {
+				return "", false
+			}
+			return "user-" + fmt.Sprint(uid), true
+		}))
+		logger.Info("gateway auth: static keys + stored keys")
 	}
 	if precharger != nil {
 		opts = append(opts, gateway.WithPreCharge(func(ctx context.Context, userID, requestID, model string, promptTokens int64, maxTokens *int64) error {

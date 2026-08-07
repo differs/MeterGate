@@ -78,17 +78,18 @@ type ChatResult struct {
 
 // Server hosts the OpenAI-compatible HTTP API.
 type Server struct {
-	upstream  Upstream
-	keys      map[string]bool   // accepted API keys (M1: static; later: store)
-	sink      metering.Sink     // optional billing event sink (M2+)
-	preCharge PreChargeFunc     // optional billing fast path (M2+)
-	resolver  ModelResolver     // optional model resolution ("auto")
-	priceSnap PriceSnapshotFunc // optional request-start price freeze
-	metrics   *obs.Metrics      // optional Prometheus metrics
-	log       *slog.Logger
-	httpSrv   *http.Server
-	now       func() time.Time
-	requestID func() string
+	upstream   Upstream
+	keys       map[string]bool                 // accepted API keys (M1: static; later: store)
+	sink       metering.Sink                   // optional billing event sink (M2+)
+	preCharge  PreChargeFunc                   // optional billing fast path (M2+)
+	resolver   ModelResolver                   // optional model resolution ("auto")
+	priceSnap  PriceSnapshotFunc               // optional request-start price freeze
+	metrics    *obs.Metrics                    // optional Prometheus metrics
+	keyResolve func(raw string) (string, bool) // optional DB-backed auth
+	log        *slog.Logger
+	httpSrv    *http.Server
+	now        func() time.Time
+	requestID  func() string
 }
 
 // Option configures a Server.
@@ -102,6 +103,12 @@ func WithKeys(keys []string) Option {
 			s.keys[k] = true
 		}
 	}
+}
+
+// WithKeyResolver attaches DB-backed key auth: the static allowlist is
+// checked first; unresolved keys fall through to the resolver (cached).
+func WithKeyResolver(fn func(raw string) (string, bool)) Option {
+	return func(s *Server) { s.keyResolve = fn }
 }
 
 // WithMetrics attaches Prometheus metrics instrumentation.

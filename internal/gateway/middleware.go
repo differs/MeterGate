@@ -20,11 +20,25 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		auth := r.Header.Get("Authorization")
 		key := strings.TrimPrefix(auth, "Bearer ")
 		key = strings.TrimSpace(key)
-		if key == "" || (s.keys != nil && !s.keys[key]) {
+		userID := key
+		ok := key != ""
+		if ok && s.keys != nil && !s.keys[key] {
+			// static allowlist miss → try the DB-backed resolver
+			if s.keyResolve != nil {
+				if uid, resolved := s.keyResolve(key); resolved {
+					userID = uid
+				} else {
+					ok = false
+				}
+			} else {
+				ok = false
+			}
+		}
+		if !ok {
 			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
 			return
 		}
-		ctx := context.WithValue(r.Context(), ctxKeyUserID, key)
+		ctx := context.WithValue(r.Context(), ctxKeyUserID, userID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

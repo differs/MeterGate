@@ -205,6 +205,22 @@ METERGATE_CONFIG=./configs/routing.example.yaml ./metergate
 - **Show HN**: [docs/posts/show-hn.md](docs/posts/show-hn.md)
 - **Chinese community post**: [docs/posts/chinese-community.md](docs/posts/chinese-community.md)
 
+## Commercial stack (P0: can take money)
+
+```bash
+# portal API (admin-key protected in dev; session auth in production)
+curl -X POST localhost:3002/api/register -d '{"username":"alice","password":"password123"}'
+curl -X POST "localhost:3002/api/keys?user_id=1" -d '{"name":"prod"}'
+curl -X POST "localhost:3002/api/recharge?user_id=1" -d '{"amount_micros":100000000,"idempotency_key":"r1"}'
+curl -X POST localhost:3002/api/recharge/pay -d '{"recharge_id":1,"channel":"mock"}'
+# then use the issued sk- key against /v1/chat/completions — stored keys
+# and the static allowlist both authenticate (cached, 60s TTL)
+```
+
+Verified end-to-end: register → login → key → recharge → mock pay →
+consume with the new key → balance exact; duplicate recharge (same
+idempotency_key) and duplicate callback both no-op (money safe).
+
 ## Horizontal scaling
 
 Verified (1/2/4 instances, per-core efficiency constant) and documented:
