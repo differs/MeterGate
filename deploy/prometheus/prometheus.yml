@@ -1,0 +1,43 @@
+# Prometheus configuration for MeterGate (Go) and stargate (Rust).
+#
+# Usage:
+#   prometheus --config.file=deploy/prometheus/prometheus.yml
+#
+# Both gateways expose /metrics. The budget alerting rules live in
+# deploy/prometheus/alerts.yml (same directory, loaded automatically).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["localhost:9093"] # Alertmanager, see deploy/alertmanager/
+
+scrape_configs:
+  # MeterGate (Go gateway) — dual-track billing + six-layer quotas.
+  - job_name: metergate
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["localhost:3000"]
+
+  # stargate (Rust gateway) — same surface, Rust implementation.
+  - job_name: stargate
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["localhost:3200"]
+
+  # PostgreSQL exporter (optional; system DB health).
+  - job_name: postgres
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["localhost:9187"]
+
+  # Redis exporter (optional; quota layer depends on it).
+  - job_name: redis
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["localhost:9121"]
