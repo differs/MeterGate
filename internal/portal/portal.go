@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ type API struct {
 	balance      func(ctx context.Context, userID int64) (int64, error)                             // may be nil
 	usage        func(ctx context.Context, userID string, days int) ([]billing.UsageDay, error)     // may be nil
 	usageByModel func(ctx context.Context, userID string, days int) ([]billing.UsageByModel, error) // may be nil
+	stripe       *payment.StripeChannel                                                             // may be nil
 	webDir       string                                                                             // static merchant portal directory (optional)
 }
 
@@ -59,6 +61,12 @@ func (api *API) WithBalance(fn func(ctx context.Context, userID int64) (int64, e
 // WithUsage attaches the per-user usage aggregator (PG-backed).
 func (api *API) WithUsage(fn func(ctx context.Context, userID string, days int) ([]billing.UsageDay, error)) *API {
 	api.usage = fn
+	return api
+}
+
+// WithStripe attaches the Stripe channel (webhook + pay).
+func (api *API) WithStripe(sc *payment.StripeChannel) *API {
+	api.stripe = sc
 	return api
 }
 
@@ -92,6 +100,7 @@ func (api *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/balance", api.balanceHandler)
 	mux.HandleFunc("GET /api/usage", api.usageHandler)
 	mux.HandleFunc("GET /api/usage/models", api.usageModelsHandler)
+	mux.HandleFunc("POST /api/payment/webhook", api.webhookHandler)
 	if api.webDir != "" {
 		mux.Handle("/", http.FileServer(http.Dir(api.webDir)))
 	}
@@ -218,6 +227,55 @@ func (api *API) usageModelsHandler(w http.ResponseWriter, r *http.Request) {
 		"total_cost_micros":    totalCost,
 		"total_margin_micros":  totalRevenue - totalCost,
 	})
+}
+
+// webhookHandler receives channel callbacks (Stripe webhook). The OIDC
+// bypass above covers it: webhook carries NO auth header.
+func (api *API) webhookHandler(w http.ResponseWriter, r *http.Request) {
+	payload, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	channel := r.URL.Query().Get("channel")
+	if channel == "" {
+		channel = "stripe"
+	}
+	ch := api.channel(channel)
+	if ch == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "unknown channel"})
+		return
+	}
+	// channel-specific signature verification
+	switch c := ch.(type) {
+	case *payment.StripeChannel:
+		body, err := c.VerifyWebhook(payload, r.Header.Get("Stripe-Signature"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid signature"})
+			return
+		}
+		evType, txnID, err := payment.ParseWebhookEvent(body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad event"})
+			return
+		}
+		if evType != "payment_intent.succeeded" {
+			writeJSON(w, http.StatusOK, map[string]any{"received": true, "ignored": evType})
+			return
+		}
+		// find the recharge by the metadata we stored at Pay()
+		if err := api.payments.SettleByTxn(r.Context(), channel, txnID); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"received": true})
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]any{"error": "channel not supported"})
+}
+
+// channel returns the registered channel by name (hack: expose via payments).
+func (api *API) channel(name string) any {
+	if name == "stripe" && api.stripe != nil {
+		return api.stripe
+	}
+	return nil
 }
 
 // userFromRequest extracts user_id: JWT context first, then query/header.

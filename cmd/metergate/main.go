@@ -240,6 +240,12 @@ func main() {
 			paySvc.RegisterChannel(payment.MockChannel{})
 
 			portalAPI := portal.New(authSvc, paySvc, adminKey)
+			if sk := envOr("METERGATE_STRIPE_SECRET_KEY", ""); sk != "" {
+				stripeCh := payment.NewStripeChannel(sk, envOr("METERGATE_STRIPE_WEBHOOK_SECRET", ""))
+				paySvc.RegisterChannel(stripeCh)
+				portalAPI.WithStripe(stripeCh)
+				logger.Info("stripe channel enabled (test or live mode)")
+			}
 			if precharger != nil {
 				portalAPI.WithBalance(func(ctx context.Context, userID int64) (int64, error) {
 					return precharger.Balance(ctx, "user-"+fmt.Sprint(userID))

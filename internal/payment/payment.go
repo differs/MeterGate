@@ -158,6 +158,19 @@ func (s *Service) SettleCallback(ctx context.Context, rechargeID int64, channel,
 	return s.topUp(ctx, userID, paidAmount)
 }
 
+// SettleByTxn settles a recharge identified by its channel txn id
+// (webhook path for real channels like Stripe).
+func (s *Service) SettleByTxn(ctx context.Context, channel, txnID string) error {
+	var rechargeID int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT recharge_id FROM payments WHERE channel=$1 AND channel_txn_id=$2`,
+		channel, txnID).Scan(&rechargeID)
+	if err != nil {
+		return err // txn unknown (not created by us) — reject
+	}
+	return s.SettleCallback(ctx, rechargeID, channel, txnID, 0, `{"via":"settle_by_txn"}`)
+}
+
 // RechargeStatus returns a recharge's current state.
 func (s *Service) RechargeStatus(ctx context.Context, rechargeID int64) (string, error) {
 	var status string

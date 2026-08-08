@@ -25,7 +25,63 @@ type ProviderBillSource interface {
 	FetchDay(ctx context.Context, provider string, day string) (*ProviderBill, error)
 }
 
-// ProviderDiff is one provider-day comparison result.
+// ProviderModelCost is one model's cost+tokens from a supplier bill
+// (the input to cost-price sync).
+type ProviderModelCost struct {
+	Provider   string
+	Model      string
+	Tokens     int64
+	CostMicros int64
+}
+
+// ModelCostSource supplies per-model supplier cost data (extended bill).
+type ModelCostSource interface {
+	FetchModelCosts(ctx context.Context, provider string, day string) ([]ProviderModelCost, error)
+}
+
+// CostPriceSyncer derives supplier cost prices from supplier bills and
+// updates the live cost table — the merchant margin analysis then reflects
+// REAL supplier pricing instead of the fallback heuristic.
+type CostPriceSyncer struct {
+	source ModelCostSource
+	log    *slog.Logger
+}
+
+// NewCostPriceSyncer builds the syncer.
+func NewCostPriceSyncer(source ModelCostSource, log *slog.Logger) *CostPriceSyncer {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &CostPriceSyncer{source: source, log: log}
+}
+
+// SyncDay pulls a provider's per-model costs for a day and updates the
+// cost price table: cost_per_1M = cost_micros * 1e6 / tokens.
+func (s *CostPriceSyncer) SyncDay(ctx context.Context, provider, day string) (int, error) {
+	costs, err := s.source.FetchModelCosts(ctx, provider, day)
+	if err != nil {
+		return 0, err
+	}
+	updated := 0
+	for _, c := range costs {
+		if c.Tokens <= 0 || c.CostMicros <= 0 {
+			continue
+		}
+		// blended per-1M cost across prompt+completion (the ledger module
+		// will split input/output precisely later)
+		per1M := c.CostMicros * 1_000_000 / c.Tokens
+		billing.UpdateCostPrice(c.Model, billing.ModelPrice{
+			InputPer1M:  per1M,
+			OutputPer1M: per1M,
+		})
+		s.log.Info("cost price synced",
+			"provider", c.Provider, "model", c.Model,
+			"per_1m_micros", per1M, "tokens", c.Tokens)
+		updated++
+	}
+	return updated, nil
+}
+
 type ProviderDiff struct {
 	Provider string
 	Day      string
