@@ -281,10 +281,22 @@ type ProjectNode struct {
 }
 
 type UserNode struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
-	RPM      int    `json:"rpm_limit"`
-	TPM      int64  `json:"tpm_limit"`
+	ID       int64     `json:"id"`
+	Username string    `json:"username"`
+	RPM      int       `json:"rpm_limit"`
+	TPM      int64     `json:"tpm_limit"`
+	Keys     []KeyNode `json:"keys"`
+}
+
+// KeyNode is a key's quota config for the admin view (no raw material).
+type KeyNode struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	RPM         int    `json:"rpm_limit"`
+	TPM         int64  `json:"tpm_limit"`
+	Concurrency int    `json:"concurrency_limit"`
+	EndUserRPM  int    `json:"end_user_rpm_limit"`
+	EndUserTPM  int64  `json:"end_user_tpm_limit"`
 }
 
 // OrgTree returns the full hierarchy with quotas (admin view).
@@ -368,6 +380,31 @@ func (s *Service) OrgTree(ctx context.Context) ([]OrgTree, error) {
 			}
 		}
 		urows.Close()
+	}
+
+	// keys by user (quota config only)
+	if krows, err := s.pool.Query(ctx,
+		`SELECT id, user_id, name, rpm_limit, tpm_limit, concurrency_limit, end_user_rpm_limit, end_user_tpm_limit
+		 FROM api_keys ORDER BY id`); err == nil {
+		for krows.Next() {
+			var kn KeyNode
+			var uid int64
+			if err := krows.Scan(&kn.ID, &uid, &kn.Name, &kn.RPM, &kn.TPM, &kn.Concurrency, &kn.EndUserRPM, &kn.EndUserTPM); err != nil {
+				continue
+			}
+			for oi := range orgs {
+				for ti := range orgs[oi].Teams {
+					for pi := range orgs[oi].Teams[ti].Projects {
+						for ui := range orgs[oi].Teams[ti].Projects[pi].Users {
+							if orgs[oi].Teams[ti].Projects[pi].Users[ui].ID == uid {
+								orgs[oi].Teams[ti].Projects[pi].Users[ui].Keys = append(orgs[oi].Teams[ti].Projects[pi].Users[ui].Keys, kn)
+							}
+						}
+					}
+				}
+			}
+		}
+		krows.Close()
 	}
 	return orgs, nil
 }
@@ -509,6 +546,14 @@ func (s *Service) CreateKey(ctx context.Context, userID int64, name string, limi
 	return key, nil
 }
 
+// SetKeyLimits updates a key's quota config (admin operation).
+func (s *Service) SetKeyLimits(ctx context.Context, keyID int64, limits Limits) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE api_keys SET rpm_limit=$2, tpm_limit=$3, concurrency_limit=$4, end_user_rpm_limit=$5, end_user_tpm_limit=$6 WHERE id=$1`,
+		keyID, limits.RPM, limits.TPM, limits.Concurrency, limits.EndUserRPM, limits.EndUserTPM)
+	return err
+}
+
 // RevokeKey disables a key.
 func (s *Service) RevokeKey(ctx context.Context, userID int64, keyID int64) error {
 	_, err := s.pool.Exec(ctx,
@@ -519,7 +564,8 @@ func (s *Service) RevokeKey(ctx context.Context, userID int64, keyID int64) erro
 // ListKeys returns a user's keys (no hashes).
 func (s *Service) ListKeys(ctx context.Context, userID int64) ([]Key, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, user_id, name, status FROM api_keys WHERE user_id=$1 ORDER BY id DESC`, userID)
+		`SELECT id, user_id, name, status, rpm_limit, tpm_limit, concurrency_limit, end_user_rpm_limit, end_user_tpm_limit
+		 FROM api_keys WHERE user_id=$1 ORDER BY id DESC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -527,7 +573,8 @@ func (s *Service) ListKeys(ctx context.Context, userID int64) ([]Key, error) {
 	var out []Key
 	for rows.Next() {
 		var k Key
-		if err := rows.Scan(&k.ID, &k.UserID, &k.Name, &k.Status); err != nil {
+		if err := rows.Scan(&k.ID, &k.UserID, &k.Name, &k.Status,
+			&k.RPM, &k.TPM, &k.Concurrency, &k.EndUserRPM, &k.EndUserTPM); err != nil {
 			return nil, err
 		}
 		out = append(out, k)

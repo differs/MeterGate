@@ -31,6 +31,9 @@
   .proj > .head { display:flex; align-items:center; gap:8px; }
   .users { margin:6px 0 4px 14px; color:var(--mut); font-size:12px; display:flex; flex-wrap:wrap; gap:6px; }
   .user { background:var(--bg); border:1px solid var(--line); padding:2px 8px; border-radius:99px; }
+  .keys { margin:4px 0 4px 14px; display:flex; flex-wrap:wrap; gap:6px; }
+  .key { background:rgba(79,140,255,.08); border:1px solid rgba(79,140,255,.3); padding:2px 9px; border-radius:6px; font-size:12px; color:var(--mut); }
+  .key b { color:var(--fg); }
   .acts { margin-left:auto; display:flex; gap:6px; }
   .acts button { padding:3px 9px; font-size:12px; }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:10; }
@@ -135,8 +138,16 @@ function render(tree) {
             </span>
           </div>
           <div class="users">
-            ${(p.users||[]).map(u => `<span class="user">${esc(u.username)} #${u.id} · ${u.rpm_limit>0||u.tpm_limit>0 ? 'R'+u.rpm_limit+' T'+u.tpm_limit : '不限'}</span>`).join('')}
+            ${(p.users||[]).map(u => `<span class="user" style="cursor:pointer" title="点击设置用户限额" onclick="editLimits('user', ${u.id}, '${esc(u.username)}', ${u.rpm_limit}, ${u.tpm_limit})">${esc(u.username)} #${u.id} · ${u.rpm_limit>0||u.tpm_limit>0 ? 'R'+u.rpm_limit+' T'+u.tpm_limit : '不限'}</span>`).join('')}
             <button style="padding:1px 8px" onclick="attachUser(${p.id})">+ 用户</button>
+          </div>
+          <div class="keys">
+            ${(p.users||[]).flatMap(u => (u.keys||[]).map(k => `<span class="key" title="key #${k.id} · 点击设置限额">
+              <b>${esc(k.name||'(unnamed)')}</b> #${k.id}
+              · RPM ${k.rpm_limit} TPM ${k.tpm_limit} 并发 ${k.concurrency_limit}
+              · 端用户 R${k.end_user_rpm_limit} T${k.end_user_tpm_limit}
+              <button style="padding:1px 7px" onclick="editKeyLimits(${k.id}, '${esc(k.name||'')}', ${k.rpm_limit}, ${k.tpm_limit}, ${k.concurrency_limit}, ${k.end_user_rpm_limit}, ${k.end_user_tpm_limit})">限额</button>
+            </span>`).join('')).join('')}
           </div>
         </div>`).join('')}
       </div>`).join('')}
@@ -170,6 +181,18 @@ function newProject(teamId) {
 function editLimits(layer, id, name, rpm, tpm) {
   openModal(`设置 ${layer} #${id} 限额`, { mode: 'limits:' + layer, id, name, rpm, tpm });
 }
+let mKey = null;
+function editKeyLimits(id, name, rpm, tpm, concurrency, euRpm, euTpm) {
+  mKey = id;
+  openModal('设置 Key #' + id + ' 限额', { mode: 'limits:key', id, name, rpm, tpm });
+  // extra fields for concurrency + end-user quotas
+  document.getElementById('m-extra-label').hidden = false;
+  document.getElementById('m-extra-label').textContent = '并发 / 端用户 RPM / TPM';
+  const extra = document.getElementById('m-extra');
+  extra.hidden = false;
+  extra.placeholder = 'concurrency,eu_rpm,eu_tpm';
+  extra.value = [concurrency, euRpm, euTpm].join(',');
+}
 async function attachUser(projectId) {
   const uid = prompt('用户 ID（user id）：');
   if (!uid) return;
@@ -193,6 +216,15 @@ async function saveModal() {
       if (layer === 'team') await api('PUT', '/api/admin/teams/' + mId + '/limits', { rpm_limit: rpm, tpm_limit: tpm });
       if (layer === 'project') await api('PUT', '/api/admin/projects/' + mId + '/limits', { rpm_limit: rpm, tpm_limit: tpm });
       if (layer === 'user') await api('PUT', '/api/admin/users/' + mId + '/limits', { rpm_limit: rpm, tpm_limit: tpm });
+      if (layer === 'key') {
+        const parts = document.getElementById('m-extra').value.split(',');
+        await api('PUT', '/api/admin/keys/' + mId + '/limits', {
+          rpm_limit: rpm, tpm_limit: tpm,
+          concurrency_limit: parseInt(parts[0]) || 0,
+          end_user_rpm_limit: parseInt(parts[1]) || 0,
+          end_user_tpm_limit: parseInt(parts[2]) || 0,
+        });
+      }
     }
     closeModal(); loadTree();
   } catch (e) { setStatus('保存失败: ' + e.message, true); }
