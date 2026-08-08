@@ -92,6 +92,11 @@ func (api *API) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/admin/users/{id}/project", api.setUserProject)
 	mux.HandleFunc("POST /api/admin/projects", api.createProject)
 	mux.HandleFunc("PUT /api/admin/projects/{id}/limits", api.setProjectLimits)
+	mux.HandleFunc("PUT /api/admin/projects/{id}/team", api.setProjectTeam)
+	mux.HandleFunc("POST /api/admin/orgs", api.createOrg)
+	mux.HandleFunc("PUT /api/admin/orgs/{id}/limits", api.setOrgLimits)
+	mux.HandleFunc("POST /api/admin/teams", api.createTeam)
+	mux.HandleFunc("PUT /api/admin/teams/{id}/limits", api.setTeamLimits)
 	mux.HandleFunc("POST /api/keys", api.createKey)
 	mux.HandleFunc("GET /api/keys", api.listKeys)
 	mux.HandleFunc("POST /api/recharge", api.recharge)
@@ -258,6 +263,130 @@ func (api *API) setProjectLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]any{"project_id": pid, "rpm_limit": req.RPM, "tpm_limit": req.TPM})
+}
+
+// setProjectTeam attaches a project to a team (layer 4).
+func (api *API) setProjectTeam(w http.ResponseWriter, r *http.Request) {
+	if !api.adminOnly(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	pid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, `{"error":"invalid project id"}`, http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		TeamID int64 `json:"team_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TeamID <= 0 {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+		return
+	}
+	if err := api.auth.SetProjectTeam(r.Context(), pid, req.TeamID); err != nil {
+		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"project_id": pid, "team_id": req.TeamID})
+}
+
+// createOrg makes an org with an aggregate quota (layer 5).
+func (api *API) createOrg(w http.ResponseWriter, r *http.Request) {
+	if !api.adminOnly(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+		RPM  int    `json:"rpm_limit"`
+		TPM  int64  `json:"tpm_limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+		return
+	}
+	o, err := api.auth.CreateOrg(r.Context(), req.Name, req.RPM, req.TPM)
+	if err != nil {
+		http.Error(w, `{"error":"create failed"}`, http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(o)
+}
+
+// setOrgLimits updates an org's aggregate quota.
+func (api *API) setOrgLimits(w http.ResponseWriter, r *http.Request) {
+	if !api.adminOnly(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	oid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, `{"error":"invalid org id"}`, http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		RPM int   `json:"rpm_limit"`
+		TPM int64 `json:"tpm_limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+		return
+	}
+	if err := api.auth.SetOrgLimits(r.Context(), oid, req.RPM, req.TPM); err != nil {
+		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"org_id": oid, "rpm_limit": req.RPM, "tpm_limit": req.TPM})
+}
+
+// createTeam makes a team inside an org with an aggregate quota (layer 4).
+func (api *API) createTeam(w http.ResponseWriter, r *http.Request) {
+	if !api.adminOnly(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		Name  string `json:"name"`
+		OrgID int64  `json:"org_id"`
+		RPM   int    `json:"rpm_limit"`
+		TPM   int64  `json:"tpm_limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+		return
+	}
+	t, err := api.auth.CreateTeam(r.Context(), req.Name, req.OrgID, req.RPM, req.TPM)
+	if err != nil {
+		http.Error(w, `{"error":"create failed"}`, http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(t)
+}
+
+// setTeamLimits updates a team's aggregate quota.
+func (api *API) setTeamLimits(w http.ResponseWriter, r *http.Request) {
+	if !api.adminOnly(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	tid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, `{"error":"invalid team id"}`, http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		RPM int   `json:"rpm_limit"`
+		TPM int64 `json:"tpm_limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+		return
+	}
+	if err := api.auth.SetTeamLimits(r.Context(), tid, req.RPM, req.TPM); err != nil {
+		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"team_id": tid, "rpm_limit": req.RPM, "tpm_limit": req.TPM})
 }
 
 func (api *API) balanceHandler(w http.ResponseWriter, r *http.Request) {
@@ -462,12 +591,16 @@ func (api *API) createKey(w http.ResponseWriter, r *http.Request) {
 		RPM         int    `json:"rpm_limit"`
 		TPM         int64  `json:"tpm_limit"`
 		Concurrency int    `json:"concurrency_limit"`
+		EndUserRPM  int    `json:"end_user_rpm_limit"`
+		EndUserTPM  int64  `json:"end_user_tpm_limit"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	key, err := api.auth.CreateKey(r.Context(), uid, req.Name, auth.Limits{
 		RPM:         req.RPM,
 		TPM:         req.TPM,
 		Concurrency: req.Concurrency,
+		EndUserRPM:  req.EndUserRPM,
+		EndUserTPM:  req.EndUserTPM,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})

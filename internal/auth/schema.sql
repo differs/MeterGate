@@ -2,15 +2,38 @@
 -- Money stays in int64 micro-units. Recharges are idempotent by
 -- idempotency_key; payments verify by signature + idempotency key.
 
--- Layer 3 of the six-layer budget model: multiple users share one
--- project-level RPM/TPM budget on top of their own user/key limits.
+-- Layers 4-5 of the six-layer budget model: org → team → project.
+-- orgs aggregate teams; teams aggregate projects.
+CREATE TABLE IF NOT EXISTS orgs (
+    id         BIGSERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    rpm_limit  BIGINT NOT NULL DEFAULT 0,  -- org aggregate RPM (0=unlimited)
+    tpm_limit  BIGINT NOT NULL DEFAULT 0,  -- org aggregate TPM
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS teams (
+    id         BIGSERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    org_id     BIGINT REFERENCES orgs(id), -- layer 5: team belongs to an org
+    rpm_limit  BIGINT NOT NULL DEFAULT 0,  -- team aggregate RPM (0=unlimited)
+    tpm_limit  BIGINT NOT NULL DEFAULT 0,  -- team aggregate TPM
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_teams_org ON teams (org_id);
+
+-- Layer 3: multiple users share one project-level RPM/TPM budget.
 CREATE TABLE IF NOT EXISTS projects (
     id         BIGSERIAL PRIMARY KEY,
     name       TEXT NOT NULL,
+    team_id    BIGINT REFERENCES teams(id), -- layer 4: project belongs to a team
     rpm_limit  BIGINT NOT NULL DEFAULT 0,  -- project aggregate RPM (0=unlimited)
     tpm_limit  BIGINT NOT NULL DEFAULT 0,  -- project aggregate TPM
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Idempotent migration for existing deployments.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS team_id BIGINT REFERENCES teams(id);
+CREATE INDEX IF NOT EXISTS idx_projects_team ON projects (team_id);
 
 CREATE TABLE IF NOT EXISTS users (
     id           BIGSERIAL PRIMARY KEY,
@@ -36,8 +59,13 @@ CREATE TABLE IF NOT EXISTS api_keys (
     last_used_at TIMESTAMPTZ,
     rpm_limit       INT NOT NULL DEFAULT 0,     -- requests per minute (0=unlimited)
     tpm_limit       BIGINT NOT NULL DEFAULT 0,  -- tokens per minute
-    concurrency_limit INT NOT NULL DEFAULT 0    -- in-flight requests
+    concurrency_limit INT NOT NULL DEFAULT 0,   -- in-flight requests
+    end_user_rpm_limit BIGINT NOT NULL DEFAULT 0, -- layer 6: per end-user RPM
+    end_user_tpm_limit BIGINT NOT NULL DEFAULT 0  -- layer 6: per end-user TPM
 );
+-- Idempotent migration for existing deployments.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS end_user_rpm_limit BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS end_user_tpm_limit BIGINT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id);
 
 -- recharge: user top-up order (money IN)

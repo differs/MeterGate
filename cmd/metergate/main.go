@@ -353,7 +353,7 @@ func main() {
 			if rdb != nil {
 				limiter := newBudgetLimiter(rdb, keyStore, metrics)
 				opts = append(opts, gateway.WithRateLimiter(limiter))
-				logger.Info("rate limiting enabled (key + user + project layers)")
+				logger.Info("rate limiting enabled (6-layer budget: end_user/key/user/project/team/org)")
 			}
 		}
 	}

@@ -41,6 +41,8 @@ type Key struct {
 	RPM         int
 	TPM         int64
 	Concurrency int
+	EndUserRPM  int
+	EndUserTPM  int64
 }
 
 //go:embed schema.sql
@@ -76,6 +78,108 @@ func (s *Service) SetUserLimits(ctx context.Context, userID int64, rpm int, tpm 
 		`UPDATE users SET rpm_limit=$2, tpm_limit=$3 WHERE id=$1`,
 		userID, rpm, tpm)
 	return err
+}
+
+// Org is layer 5 (top) of the six-layer budget model: an organization
+// aggregates teams, each aggregating projects.
+type Org struct {
+	ID   int64
+	Name string
+	RPM  int
+	TPM  int64
+}
+
+// Team is layer 4: a team aggregates projects inside an org.
+type Team struct {
+	ID    int64
+	Name  string
+	OrgID int64
+	RPM   int
+	TPM   int64
+}
+
+// CreateOrg makes an org with an aggregate quota (0 = unlimited).
+func (s *Service) CreateOrg(ctx context.Context, name string, rpm int, tpm int64) (*Org, error) {
+	var o Org
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO orgs (name, rpm_limit, tpm_limit) VALUES ($1,$2,$3) RETURNING id, name, rpm_limit, tpm_limit`,
+		name, rpm, tpm).Scan(&o.ID, &o.Name, &o.RPM, &o.TPM)
+	if err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
+// SetOrgLimits updates an org's aggregate quota (admin operation).
+func (s *Service) SetOrgLimits(ctx context.Context, orgID int64, rpm int, tpm int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orgs SET rpm_limit=$2, tpm_limit=$3 WHERE id=$1`, orgID, rpm, tpm)
+	return err
+}
+
+// ResolveOrgLimits returns an org's aggregate quota (0 = unlimited).
+func (s *Service) ResolveOrgLimits(ctx context.Context, orgID int64) (Limits, error) {
+	var l Limits
+	err := s.pool.QueryRow(ctx,
+		`SELECT rpm_limit, tpm_limit FROM orgs WHERE id=$1`, orgID).Scan(&l.RPM, &l.TPM)
+	if err != nil {
+		return Limits{}, err
+	}
+	return l, nil
+}
+
+// CreateTeam makes a team inside an org with an aggregate quota.
+func (s *Service) CreateTeam(ctx context.Context, name string, orgID int64, rpm int, tpm int64) (*Team, error) {
+	var t Team
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO teams (name, org_id, rpm_limit, tpm_limit) VALUES ($1,$2,$3,$4)
+		 RETURNING id, name, org_id, rpm_limit, tpm_limit`,
+		name, orgID, rpm, tpm).Scan(&t.ID, &t.Name, &t.OrgID, &t.RPM, &t.TPM)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// SetTeamLimits updates a team's aggregate quota (admin operation).
+func (s *Service) SetTeamLimits(ctx context.Context, teamID int64, rpm int, tpm int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE teams SET rpm_limit=$2, tpm_limit=$3 WHERE id=$1`, teamID, rpm, tpm)
+	return err
+}
+
+// ResolveTeamLimits returns a team's aggregate quota (0 = unlimited).
+func (s *Service) ResolveTeamLimits(ctx context.Context, teamID int64) (Limits, error) {
+	var l Limits
+	err := s.pool.QueryRow(ctx,
+		`SELECT rpm_limit, tpm_limit FROM teams WHERE id=$1`, teamID).Scan(&l.RPM, &l.TPM)
+	if err != nil {
+		return Limits{}, err
+	}
+	return l, nil
+}
+
+// SetProjectTeam attaches a project to a team (shares the team budget).
+func (s *Service) SetProjectTeam(ctx context.Context, projectID, teamID int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE projects SET team_id=$2 WHERE id=$1`, projectID, teamID)
+	return err
+}
+
+// TeamOfProject returns the team a project belongs to (0 = none).
+func (s *Service) TeamOfProject(ctx context.Context, projectID int64) (int64, error) {
+	var tid int64
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(team_id, 0) FROM projects WHERE id=$1`,
+		projectID).Scan(&tid)
+	return tid, err
+}
+
+// OrgOfTeam returns the org a team belongs to (0 = none).
+func (s *Service) OrgOfTeam(ctx context.Context, teamID int64) (int64, error) {
+	var oid int64
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(org_id, 0) FROM teams WHERE id=$1`,
+		teamID).Scan(&oid)
+	return oid, err
 }
 
 // Project is layer 3 of the six-layer budget model: a shared budget
@@ -218,9 +322,9 @@ func (s *Service) CreateKey(ctx context.Context, userID int64, name string, limi
 	key := "sk-" + hex.EncodeToString(raw)
 	hash := keyHash(key)
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO api_keys (user_id, key_hash, name, rpm_limit, tpm_limit, concurrency_limit)
-		 VALUES ($1,$2,$3,$4,$5,$6)`,
-		userID, hash, name, limits.RPM, limits.TPM, limits.Concurrency)
+		`INSERT INTO api_keys (user_id, key_hash, name, rpm_limit, tpm_limit, concurrency_limit, end_user_rpm_limit, end_user_tpm_limit)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		userID, hash, name, limits.RPM, limits.TPM, limits.Concurrency, limits.EndUserRPM, limits.EndUserTPM)
 	if err != nil {
 		return "", err
 	}
@@ -254,10 +358,15 @@ func (s *Service) ListKeys(ctx context.Context, userID int64) ([]Key, error) {
 }
 
 // Limits is a key's rate-limit configuration (0 = unlimited).
+// Limits defines the quota for one scope (key/user/project/team/org).
+// EndUserRPM/EndUserTPM apply to each end-user of the key (layer 6):
+// the gateway scopes them as eu:{rawKey}:{endUserID}.
 type Limits struct {
 	RPM         int
 	TPM         int64
 	Concurrency int
+	EndUserRPM  int
+	EndUserTPM  int64
 }
 
 // KeyStore resolves a raw API key to its user (gateway auth path).
@@ -306,6 +415,26 @@ func (k *PostgresKeyStore) ProjectOfUser(ctx context.Context, userID int64) (int
 	return k.svc.ProjectOfUser(ctx, userID)
 }
 
+// TeamOfProject returns the team a project belongs to (0 = none).
+func (k *PostgresKeyStore) TeamOfProject(ctx context.Context, projectID int64) (int64, error) {
+	return k.svc.TeamOfProject(ctx, projectID)
+}
+
+// OrgOfTeam returns the org a team belongs to (0 = none).
+func (k *PostgresKeyStore) OrgOfTeam(ctx context.Context, teamID int64) (int64, error) {
+	return k.svc.OrgOfTeam(ctx, teamID)
+}
+
+// ResolveTeamLimits returns a team's aggregate quota (0 = unlimited).
+func (k *PostgresKeyStore) ResolveTeamLimits(ctx context.Context, teamID int64) (Limits, error) {
+	return k.svc.ResolveTeamLimits(ctx, teamID)
+}
+
+// ResolveOrgLimits returns an org's aggregate quota (0 = unlimited).
+func (k *PostgresKeyStore) ResolveOrgLimits(ctx context.Context, orgID int64) (Limits, error) {
+	return k.svc.ResolveOrgLimits(ctx, orgID)
+}
+
 // ResolveProjectLimits returns a project's aggregate quota (0 = unlimited).
 func (k *PostgresKeyStore) ResolveProjectLimits(ctx context.Context, projectID int64) (Limits, error) {
 	return k.svc.ResolveProjectLimits(ctx, projectID)
@@ -316,8 +445,8 @@ func (k *PostgresKeyStore) ResolveLimits(ctx context.Context, rawKey string) (Li
 	hash := keyHash(rawKey)
 	var l Limits
 	err := k.svc.pool.QueryRow(ctx,
-		`SELECT rpm_limit, tpm_limit, concurrency_limit FROM api_keys WHERE key_hash=$1`,
-		hash).Scan(&l.RPM, &l.TPM, &l.Concurrency)
+		`SELECT rpm_limit, tpm_limit, concurrency_limit, end_user_rpm_limit, end_user_tpm_limit FROM api_keys WHERE key_hash=$1`,
+		hash).Scan(&l.RPM, &l.TPM, &l.Concurrency, &l.EndUserRPM, &l.EndUserTPM)
 	if err != nil {
 		return Limits{}, err
 	}
@@ -358,6 +487,39 @@ func (c *CachedKeyStore) ProjectOfUser(ctx context.Context, userID int64) (int64
 func (c *CachedKeyStore) ProjectLimits(ctx context.Context, projectID int64) (Limits, error) {
 	if ks, ok := c.inner.(*PostgresKeyStore); ok {
 		return ks.ResolveProjectLimits(ctx, projectID)
+	}
+	return Limits{}, nil
+}
+
+// TeamOfProject returns the team a project belongs to (0 = none),
+// cache-first with the same TTL as key resolution.
+func (c *CachedKeyStore) TeamOfProject(ctx context.Context, projectID int64) (int64, error) {
+	if ks, ok := c.inner.(*PostgresKeyStore); ok {
+		return ks.TeamOfProject(ctx, projectID)
+	}
+	return 0, nil
+}
+
+// TeamLimits returns a team's aggregate quota (cache-first).
+func (c *CachedKeyStore) TeamLimits(ctx context.Context, teamID int64) (Limits, error) {
+	if ks, ok := c.inner.(*PostgresKeyStore); ok {
+		return ks.ResolveTeamLimits(ctx, teamID)
+	}
+	return Limits{}, nil
+}
+
+// OrgOfTeam returns the org a team belongs to (0 = none), cache-first.
+func (c *CachedKeyStore) OrgOfTeam(ctx context.Context, teamID int64) (int64, error) {
+	if ks, ok := c.inner.(*PostgresKeyStore); ok {
+		return ks.OrgOfTeam(ctx, teamID)
+	}
+	return 0, nil
+}
+
+// OrgLimits returns an org's aggregate quota (cache-first).
+func (c *CachedKeyStore) OrgLimits(ctx context.Context, orgID int64) (Limits, error) {
+	if ks, ok := c.inner.(*PostgresKeyStore); ok {
+		return ks.ResolveOrgLimits(ctx, orgID)
 	}
 	return Limits{}, nil
 }
