@@ -78,6 +78,62 @@ func (s *Service) SetUserLimits(ctx context.Context, userID int64, rpm int, tpm 
 	return err
 }
 
+// Project is layer 3 of the six-layer budget model: a shared budget
+// across multiple users.
+type Project struct {
+	ID   int64
+	Name string
+	RPM  int
+	TPM  int64
+}
+
+// CreateProject makes a project with an aggregate quota (0 = unlimited).
+func (s *Service) CreateProject(ctx context.Context, name string, rpm int, tpm int64) (*Project, error) {
+	var p Project
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO projects (name, rpm_limit, tpm_limit) VALUES ($1,$2,$3) RETURNING id, name, rpm_limit, tpm_limit`,
+		name, rpm, tpm).Scan(&p.ID, &p.Name, &p.RPM, &p.TPM)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// SetProjectLimits updates a project's aggregate quota (admin operation).
+func (s *Service) SetProjectLimits(ctx context.Context, projectID int64, rpm int, tpm int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE projects SET rpm_limit=$2, tpm_limit=$3 WHERE id=$1`,
+		projectID, rpm, tpm)
+	return err
+}
+
+// ResolveProjectLimits returns a project's aggregate quota (0 = unlimited).
+func (s *Service) ResolveProjectLimits(ctx context.Context, projectID int64) (Limits, error) {
+	var l Limits
+	err := s.pool.QueryRow(ctx,
+		`SELECT rpm_limit, tpm_limit FROM projects WHERE id=$1`,
+		projectID).Scan(&l.RPM, &l.TPM)
+	if err != nil {
+		return Limits{}, err
+	}
+	return l, nil
+}
+
+// SetUserProject assigns a user to a project (shares its budget).
+func (s *Service) SetUserProject(ctx context.Context, userID, projectID int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE users SET project_id=$2 WHERE id=$1`, userID, projectID)
+	return err
+}
+
+// ProjectOfUser returns the project a user belongs to (0 = none).
+func (s *Service) ProjectOfUser(ctx context.Context, userID int64) (int64, error) {
+	var pid int64
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(project_id, 0) FROM users WHERE id=$1`,
+		userID).Scan(&pid)
+	return pid, err
+}
+
 // LoginVerified bypasses the password check (internal use: OIDC users).
 func (s *Service) LoginVerified(ctx context.Context, username string) (*User, error) {
 	var u User
@@ -245,6 +301,16 @@ func (k *PostgresKeyStore) ResolveUserLimits(ctx context.Context, userID int64) 
 	return k.svc.ResolveUserLimits(ctx, userID)
 }
 
+// ProjectOfUser returns the project a user belongs to (0 = none).
+func (k *PostgresKeyStore) ProjectOfUser(ctx context.Context, userID int64) (int64, error) {
+	return k.svc.ProjectOfUser(ctx, userID)
+}
+
+// ResolveProjectLimits returns a project's aggregate quota (0 = unlimited).
+func (k *PostgresKeyStore) ResolveProjectLimits(ctx context.Context, projectID int64) (Limits, error) {
+	return k.svc.ResolveProjectLimits(ctx, projectID)
+}
+
 // ResolveLimits returns a key's rate limits (0 = unlimited).
 func (k *PostgresKeyStore) ResolveLimits(ctx context.Context, rawKey string) (Limits, error) {
 	hash := keyHash(rawKey)
@@ -275,6 +341,23 @@ func (c *CachedKeyStore) Limits(ctx context.Context, rawKey string) (Limits, err
 func (c *CachedKeyStore) UserLimits(ctx context.Context, userID int64) (Limits, error) {
 	if ks, ok := c.inner.(*PostgresKeyStore); ok {
 		return ks.ResolveUserLimits(ctx, userID)
+	}
+	return Limits{}, nil
+}
+
+// ProjectOfUser returns the project a user belongs to (0 = none),
+// cache-first with the same TTL as key resolution.
+func (c *CachedKeyStore) ProjectOfUser(ctx context.Context, userID int64) (int64, error) {
+	if ks, ok := c.inner.(*PostgresKeyStore); ok {
+		return ks.ProjectOfUser(ctx, userID)
+	}
+	return 0, nil
+}
+
+// ProjectLimits returns a project's aggregate quota (cache-first).
+func (c *CachedKeyStore) ProjectLimits(ctx context.Context, projectID int64) (Limits, error) {
+	if ks, ok := c.inner.(*PostgresKeyStore); ok {
+		return ks.ResolveProjectLimits(ctx, projectID)
 	}
 	return Limits{}, nil
 }

@@ -89,6 +89,9 @@ func (api *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/register", api.register)
 	mux.HandleFunc("POST /api/login", api.login)
 	mux.HandleFunc("PUT /api/admin/users/{id}/limits", api.setUserLimits)
+	mux.HandleFunc("PUT /api/admin/users/{id}/project", api.setUserProject)
+	mux.HandleFunc("POST /api/admin/projects", api.createProject)
+	mux.HandleFunc("PUT /api/admin/projects/{id}/limits", api.setProjectLimits)
 	mux.HandleFunc("POST /api/keys", api.createKey)
 	mux.HandleFunc("GET /api/keys", api.listKeys)
 	mux.HandleFunc("POST /api/recharge", api.recharge)
@@ -176,6 +179,85 @@ func (api *API) setUserLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]any{"user_id": id, "rpm_limit": req.RPM, "tpm_limit": req.TPM})
+}
+
+// adminOnly rejects unless the request carries the platform admin key.
+func (api *API) adminOnly(r *http.Request) bool {
+	return api.adminKey != "" && r.Header.Get("Authorization") == "Bearer "+api.adminKey
+}
+
+// setUserProject assigns a user to a project (shares its budget).
+func (api *API) setUserProject(w http.ResponseWriter, r *http.Request) {
+	if !api.adminOnly(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	uid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, `{"error":"invalid user id"}`, http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		ProjectID int64 `json:"project_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+		return
+	}
+	if err := api.auth.SetUserProject(r.Context(), uid, req.ProjectID); err != nil {
+		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"user_id": uid, "project_id": req.ProjectID})
+}
+
+// createProject makes a project with an aggregate quota.
+func (api *API) createProject(w http.ResponseWriter, r *http.Request) {
+	if !api.adminOnly(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+		RPM  int    `json:"rpm_limit"`
+		TPM  int64  `json:"tpm_limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+		return
+	}
+	p, err := api.auth.CreateProject(r.Context(), req.Name, req.RPM, req.TPM)
+	if err != nil {
+		http.Error(w, `{"error":"create failed"}`, http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(p)
+}
+
+// setProjectLimits updates a project's aggregate quota.
+func (api *API) setProjectLimits(w http.ResponseWriter, r *http.Request) {
+	if !api.adminOnly(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	pid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, `{"error":"invalid project id"}`, http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		RPM int   `json:"rpm_limit"`
+		TPM int64 `json:"tpm_limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+		return
+	}
+	if err := api.auth.SetProjectLimits(r.Context(), pid, req.RPM, req.TPM); err != nil {
+		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"project_id": pid, "rpm_limit": req.RPM, "tpm_limit": req.TPM})
 }
 
 func (api *API) balanceHandler(w http.ResponseWriter, r *http.Request) {

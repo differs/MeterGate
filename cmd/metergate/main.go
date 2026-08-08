@@ -351,9 +351,9 @@ func main() {
 			// and pass through.
 			rdb := precharger.Redis()
 			if rdb != nil {
-				limiter := newUserKeyLimiter(rdb, keyStore, metrics)
+				limiter := newBudgetLimiter(rdb, keyStore, metrics)
 				opts = append(opts, gateway.WithRateLimiter(limiter))
-				logger.Info("rate limiting enabled (key + user aggregate layers)")
+				logger.Info("rate limiting enabled (key + user + project layers)")
 			}
 		}
 	}

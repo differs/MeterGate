@@ -41,7 +41,9 @@ func NewChecker(rdb *redis.Client) *Checker {
 //	KEYS[1] = rl:{scope}:{kind}
 //	ARGV[1] = now_ms  ARGV[2] = window_ms  ARGV[3] = limit  ARGV[4] = weight
 //
-// returns: -1 = over limit; otherwise the current window count.
+// returns: >= 0 = current window count (request admitted); < 0 = over
+// limit, and |value| is the precise retry-after in seconds until the
+// oldest entry slides out of the window.
 var windowScript = redis.NewScript(`
 local now = tonumber(ARGV[1])
 local win = tonumber(ARGV[2])
@@ -50,7 +52,10 @@ local weight = tonumber(ARGV[4])
 redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, now - win)
 local count = tonumber(redis.call('ZCARD', KEYS[1]) or '0')
 if count + weight > limit then
-  return -1
+  local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+  local oldest_ts = tonumber(oldest[2]) or now
+  local retry = math.floor((oldest_ts + win - now) / 1000) + 1
+  return -retry
 end
 for i = 1, weight do
   redis.call('ZADD', KEYS[1], now, now .. ':' .. redis.call('INCR', KEYS[1] .. ':seq'))
@@ -70,6 +75,10 @@ func (c *Checker) CheckRPM(ctx context.Context, scope string, limit int) (retryA
 		time.Now().UnixMilli(), window.Milliseconds(), limit, 1,
 	).Int64()
 	if err != nil || res < 0 {
+		// res < 0: |res| = precise retry-after from the oldest window entry.
+		if err == nil && res < 0 {
+			return int(-res), false
+		}
 		return retryAfterFor(scope, c.rdb), false
 	}
 	return 0, true
@@ -86,6 +95,9 @@ func (c *Checker) CheckTPM(ctx context.Context, scope string, limit, tokens int6
 		time.Now().UnixMilli(), window.Milliseconds(), limit, tokens,
 	).Int64()
 	if err != nil || res < 0 {
+		if err == nil && res < 0 {
+			return int(-res), false
+		}
 		return retryAfterFor(scope, c.rdb), false
 	}
 	return 0, true

@@ -2,6 +2,16 @@
 -- Money stays in int64 micro-units. Recharges are idempotent by
 -- idempotency_key; payments verify by signature + idempotency key.
 
+-- Layer 3 of the six-layer budget model: multiple users share one
+-- project-level RPM/TPM budget on top of their own user/key limits.
+CREATE TABLE IF NOT EXISTS projects (
+    id         BIGSERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    rpm_limit  BIGINT NOT NULL DEFAULT 0,  -- project aggregate RPM (0=unlimited)
+    tpm_limit  BIGINT NOT NULL DEFAULT 0,  -- project aggregate TPM
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id           BIGSERIAL PRIMARY KEY,
     username     TEXT UNIQUE NOT NULL,
@@ -9,8 +19,12 @@ CREATE TABLE IF NOT EXISTS users (
     status       SMALLINT NOT NULL DEFAULT 1, -- 1=enabled 0=disabled
     rpm_limit    BIGINT NOT NULL DEFAULT 0,   -- user-level aggregate RPM (0=unlimited)
     tpm_limit    BIGINT NOT NULL DEFAULT 0,   -- user-level aggregate TPM (0=unlimited)
+    project_id   BIGINT REFERENCES projects(id), -- layer 3: shared project budget
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Idempotent migration for existing deployments.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id);
+CREATE INDEX IF NOT EXISTS idx_users_project ON users (project_id);
 
 CREATE TABLE IF NOT EXISTS api_keys (
     id         BIGSERIAL PRIMARY KEY,
