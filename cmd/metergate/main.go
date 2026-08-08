@@ -345,13 +345,15 @@ func main() {
 		logger.Info("gateway auth: static keys + stored keys")
 
 		if precharger != nil {
-			// KeyLimiter: enforces per-key RPM/TPM/concurrency limits from
-			// the stored key config (user-level limits layer next).
+			// userKeyLimiter: layer 1 per-key RPM/TPM/concurrency + layer 2
+			// user-level aggregate budget shared by all keys of a user
+			// (six-layer budget model). Static keys have no stored limits
+			// and pass through.
 			rdb := precharger.Redis()
 			if rdb != nil {
-				limiter := newKeyLimiter(rdb, keyStore)
+				limiter := newUserKeyLimiter(rdb, keyStore, metrics)
 				opts = append(opts, gateway.WithRateLimiter(limiter))
-				logger.Info("rate limiting enabled (RPM/TPM/concurrency per key)")
+				logger.Info("rate limiting enabled (key + user aggregate layers)")
 			}
 		}
 	}

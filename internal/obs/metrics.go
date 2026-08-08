@@ -38,6 +38,9 @@ type Metrics struct {
 	ReconDiffTotal       *prometheus.CounterVec // layer: internal|supplier
 	ReconWithinTolerance prometheus.Gauge       // 1 = last run clean
 
+	// --- Rate limiting ---
+	RateLimitedTotal *prometheus.CounterVec // layer: key|user
+
 	// --- Routing health ---
 	ChannelHealth       *prometheus.GaugeVec // 1 = healthy
 	ChannelBreakerState *prometheus.GaugeVec // 0 closed 1 open 2 half-open
@@ -110,6 +113,11 @@ func New() *Metrics {
 			Name: "metergate_recon_within_tolerance",
 			Help: "1 if the last reconciliation run was within tolerance.",
 		}),
+
+		RateLimitedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "metergate_rate_limited_total",
+			Help: "Requests rejected by the quota layer (six-layer budget model).",
+		}, []string{"layer"}),
 
 		ChannelHealth: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "metergate_channel_health",

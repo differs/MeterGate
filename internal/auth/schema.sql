@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS users (
     username     TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,          -- bcrypt
     status       SMALLINT NOT NULL DEFAULT 1, -- 1=enabled 0=disabled
+    rpm_limit    BIGINT NOT NULL DEFAULT 0,   -- user-level aggregate RPM (0=unlimited)
+    tpm_limit    BIGINT NOT NULL DEFAULT 0,   -- user-level aggregate TPM (0=unlimited)
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

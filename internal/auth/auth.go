@@ -56,6 +56,28 @@ func (s *Service) Pool() *pgxpool.Pool {
 	return s.pool
 }
 
+// ResolveUserLimits returns the user-level aggregate quota (0 = unlimited).
+// Layer 2 of the six-layer budget model: all keys of a user share this
+// budget on top of each key's own limits.
+func (s *Service) ResolveUserLimits(ctx context.Context, userID int64) (Limits, error) {
+	var l Limits
+	err := s.pool.QueryRow(ctx,
+		`SELECT rpm_limit, tpm_limit FROM users WHERE id=$1`,
+		userID).Scan(&l.RPM, &l.TPM)
+	if err != nil {
+		return Limits{}, err
+	}
+	return l, nil
+}
+
+// SetUserLimits updates a user's aggregate quota (admin operation).
+func (s *Service) SetUserLimits(ctx context.Context, userID int64, rpm int, tpm int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE users SET rpm_limit=$2, tpm_limit=$3 WHERE id=$1`,
+		userID, rpm, tpm)
+	return err
+}
+
 // LoginVerified bypasses the password check (internal use: OIDC users).
 func (s *Service) LoginVerified(ctx context.Context, username string) (*User, error) {
 	var u User
@@ -218,6 +240,11 @@ func (k *PostgresKeyStore) Resolve(ctx context.Context, rawKey string) (int64, e
 	return userID, nil
 }
 
+// ResolveUserLimits returns a user's aggregate quota (0 = unlimited).
+func (k *PostgresKeyStore) ResolveUserLimits(ctx context.Context, userID int64) (Limits, error) {
+	return k.svc.ResolveUserLimits(ctx, userID)
+}
+
 // ResolveLimits returns a key's rate limits (0 = unlimited).
 func (k *PostgresKeyStore) ResolveLimits(ctx context.Context, rawKey string) (Limits, error) {
 	hash := keyHash(rawKey)
@@ -240,6 +267,14 @@ func keyHash(raw string) string {
 func (c *CachedKeyStore) Limits(ctx context.Context, rawKey string) (Limits, error) {
 	if ks, ok := c.inner.(*PostgresKeyStore); ok {
 		return ks.ResolveLimits(ctx, rawKey)
+	}
+	return Limits{}, nil
+}
+
+// UserLimits returns a user's aggregate quota (cache-first; DB fallback).
+func (c *CachedKeyStore) UserLimits(ctx context.Context, userID int64) (Limits, error) {
+	if ks, ok := c.inner.(*PostgresKeyStore); ok {
+		return ks.ResolveUserLimits(ctx, userID)
 	}
 	return Limits{}, nil
 }

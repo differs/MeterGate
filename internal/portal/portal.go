@@ -88,6 +88,7 @@ func (api *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/register", api.register)
 	mux.HandleFunc("POST /api/login", api.login)
+	mux.HandleFunc("PUT /api/admin/users/{id}/limits", api.setUserLimits)
 	mux.HandleFunc("POST /api/keys", api.createKey)
 	mux.HandleFunc("GET /api/keys", api.listKeys)
 	mux.HandleFunc("POST /api/recharge", api.recharge)
@@ -150,6 +151,33 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 // balanceHandler returns the authenticated user's balance (JWT context).
+// setUserLimits updates a user's aggregate quota (layer 2 of the
+// six-layer budget model). Admin-key only: it mutates platform policy.
+func (api *API) setUserLimits(w http.ResponseWriter, r *http.Request) {
+	if api.adminKey == "" || r.Header.Get("Authorization") != "Bearer "+api.adminKey {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, `{"error":"invalid user id"}`, http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		RPM int   `json:"rpm_limit"`
+		TPM int64 `json:"tpm_limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid body"}`, http.StatusBadRequest)
+		return
+	}
+	if err := api.auth.SetUserLimits(r.Context(), id, req.RPM, req.TPM); err != nil {
+		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"user_id": id, "rpm_limit": req.RPM, "tpm_limit": req.TPM})
+}
+
 func (api *API) balanceHandler(w http.ResponseWriter, r *http.Request) {
 	uid, err := userFromRequest(r)
 	if err != nil {
