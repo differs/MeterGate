@@ -20,6 +20,7 @@ import (
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userID := ctx.Value(ctxKeyUserID).(string)
+	rawKey, _ := ctx.Value(ctxKeyRawKey).(string)
 
 	// Read the full body once: needed for transparent forwarding AND
 	// prompt estimation. (Bodies are small; upstreams cap input sizes.)
@@ -78,6 +79,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Billing fast path: reserve funds before touching the upstream.
 	if s.preCharge != nil {
+		// Rate limiting (RPM/TPM/concurrency) before the billing fast path.
+		// Scope is the raw API key: per-key stored limits apply; static
+		// keys and unknown keys pass through (no stored limits).
+		if s.limiter != nil {
+			retryAfter, ok := s.limiter.Allow(ctx, rawKey, int64(promptTokens))
+			if !ok {
+				w.Header().Set("Retry-After", fmt.Sprint(retryAfter))
+				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
+			defer s.limiter.Done(ctx, rawKey)
+		}
 		if err := s.preCharge(ctx, userID, call.RequestID, req.Model, int64(promptTokens), maxTokensPtr(req.MaxTokens)); err != nil {
 			writeError(w, http.StatusPaymentRequired, "insufficient balance or pre-charge rejected")
 			return

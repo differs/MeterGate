@@ -86,6 +86,7 @@ type Server struct {
 	priceSnap  PriceSnapshotFunc               // optional request-start price freeze
 	metrics    *obs.Metrics                    // optional Prometheus metrics
 	keyResolve func(raw string) (string, bool) // optional DB-backed auth
+	limiter    RateLimiter                     // optional rate limiting
 	log        *slog.Logger
 	httpSrv    *http.Server
 	now        func() time.Time
@@ -103,6 +104,18 @@ func WithKeys(keys []string) Option {
 			s.keys[k] = true
 		}
 	}
+}
+
+// RateLimiter is the quota check hook: returns (retryAfterSeconds, ok).
+type RateLimiter interface {
+	Allow(ctx context.Context, userID string, promptTokens int64) (retryAfter int, ok bool)
+	// Done releases an in-flight slot.
+	Done(ctx context.Context, userID string)
+}
+
+// WithRateLimiter attaches quota enforcement.
+func WithRateLimiter(l RateLimiter) Option {
+	return func(s *Server) { s.limiter = l }
 }
 
 // WithKeyResolver attaches DB-backed key auth: the static allowlist is

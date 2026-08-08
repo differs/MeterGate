@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS api_keys (
     name       TEXT NOT NULL DEFAULT '',
     status     SMALLINT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_used_at TIMESTAMPTZ
+    last_used_at TIMESTAMPTZ,
+    rpm_limit       INT NOT NULL DEFAULT 0,     -- requests per minute (0=unlimited)
+    tpm_limit       BIGINT NOT NULL DEFAULT 0,  -- tokens per minute
+    concurrency_limit INT NOT NULL DEFAULT 0    -- in-flight requests
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id);
 

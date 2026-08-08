@@ -343,6 +343,17 @@ func main() {
 			return "user-" + fmt.Sprint(uid), true
 		}))
 		logger.Info("gateway auth: static keys + stored keys")
+
+		if precharger != nil {
+			// KeyLimiter: enforces per-key RPM/TPM/concurrency limits from
+			// the stored key config (user-level limits layer next).
+			rdb := precharger.Redis()
+			if rdb != nil {
+				limiter := newKeyLimiter(rdb, keyStore)
+				opts = append(opts, gateway.WithRateLimiter(limiter))
+				logger.Info("rate limiting enabled (RPM/TPM/concurrency per key)")
+			}
+		}
 	}
 	if precharger != nil {
 		opts = append(opts, gateway.WithPreCharge(func(ctx context.Context, userID, requestID, model string, promptTokens int64, maxTokens *int64) error {

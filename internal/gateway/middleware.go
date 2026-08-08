@@ -10,6 +10,7 @@ type ctxKey int
 
 const (
 	ctxKeyUserID ctxKey = iota
+	ctxKeyRawKey
 )
 
 // authMiddleware validates the Bearer API key.
@@ -39,6 +40,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxKeyUserID, userID)
+		ctx = context.WithValue(ctx, ctxKeyRawKey, key)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

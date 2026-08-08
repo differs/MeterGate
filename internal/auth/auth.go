@@ -34,10 +34,13 @@ type User struct {
 
 // Key is an API key bound to a user.
 type Key struct {
-	ID     int64
-	UserID int64
-	Name   string
-	Status int
+	ID          int64
+	UserID      int64
+	Name        string
+	Status      int
+	RPM         int
+	TPM         int64
+	Concurrency int
 }
 
 //go:embed schema.sql
@@ -127,9 +130,9 @@ func (s *Service) Login(ctx context.Context, username, password string) (*User, 
 	return &u, nil
 }
 
-// CreateKey issues a new sk- key for a user. Returns the raw key (shown
-// once); only its hash is stored.
-func (s *Service) CreateKey(ctx context.Context, userID int64, name string) (string, error) {
+// CreateKey issues a new sk- key for a user with optional rate limits.
+// Returns the raw key (shown once); only its hash is stored.
+func (s *Service) CreateKey(ctx context.Context, userID int64, name string, limits Limits) (string, error) {
 	raw := make([]byte, 24)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
@@ -137,8 +140,9 @@ func (s *Service) CreateKey(ctx context.Context, userID int64, name string) (str
 	key := "sk-" + hex.EncodeToString(raw)
 	hash := keyHash(key)
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO api_keys (user_id, key_hash, name) VALUES ($1,$2,$3)`,
-		userID, hash, name)
+		`INSERT INTO api_keys (user_id, key_hash, name, rpm_limit, tpm_limit, concurrency_limit)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		userID, hash, name, limits.RPM, limits.TPM, limits.Concurrency)
 	if err != nil {
 		return "", err
 	}
@@ -169,6 +173,13 @@ func (s *Service) ListKeys(ctx context.Context, userID int64) ([]Key, error) {
 		out = append(out, k)
 	}
 	return out, rows.Err()
+}
+
+// Limits is a key's rate-limit configuration (0 = unlimited).
+type Limits struct {
+	RPM         int
+	TPM         int64
+	Concurrency int
 }
 
 // KeyStore resolves a raw API key to its user (gateway auth path).
@@ -207,9 +218,30 @@ func (k *PostgresKeyStore) Resolve(ctx context.Context, rawKey string) (int64, e
 	return userID, nil
 }
 
+// ResolveLimits returns a key's rate limits (0 = unlimited).
+func (k *PostgresKeyStore) ResolveLimits(ctx context.Context, rawKey string) (Limits, error) {
+	hash := keyHash(rawKey)
+	var l Limits
+	err := k.svc.pool.QueryRow(ctx,
+		`SELECT rpm_limit, tpm_limit, concurrency_limit FROM api_keys WHERE key_hash=$1`,
+		hash).Scan(&l.RPM, &l.TPM, &l.Concurrency)
+	if err != nil {
+		return Limits{}, err
+	}
+	return l, nil
+}
+
 func keyHash(raw string) string {
 	h := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(h[:])
+}
+
+// Limits returns a key's rate limits (cache-first; DB fallback).
+func (c *CachedKeyStore) Limits(ctx context.Context, rawKey string) (Limits, error) {
+	if ks, ok := c.inner.(*PostgresKeyStore); ok {
+		return ks.ResolveLimits(ctx, rawKey)
+	}
+	return Limits{}, nil
 }
 
 // CachedKeyStore wraps a KeyStore with a small TTL cache so the gateway

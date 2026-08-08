@@ -348,10 +348,17 @@ func (api *API) createKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name string `json:"name"`
+		Name        string `json:"name"`
+		RPM         int    `json:"rpm_limit"`
+		TPM         int64  `json:"tpm_limit"`
+		Concurrency int    `json:"concurrency_limit"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	key, err := api.auth.CreateKey(r.Context(), uid, req.Name)
+	key, err := api.auth.CreateKey(r.Context(), uid, req.Name, auth.Limits{
+		RPM:         req.RPM,
+		TPM:         req.TPM,
+		Concurrency: req.Concurrency,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return

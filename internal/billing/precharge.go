@@ -139,6 +139,11 @@ func (p *Precharger) Settle(ctx context.Context, userID, requestID string, charg
 	return err
 }
 
+// Redis exposes the underlying client (rate limiting shares it).
+func (p *Precharger) Redis() *redis.Client {
+	return p.rdb
+}
+
 // Balance returns the live user balance (zero when unset).
 func (p *Precharger) Balance(ctx context.Context, userID string) (int64, error) {
 	return p.rdb.Get(ctx, balKey(userID)).Int64()
