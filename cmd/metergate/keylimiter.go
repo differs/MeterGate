@@ -90,27 +90,25 @@ func (k *budgetLimiter) Allow(ctx context.Context, rawKey string, promptTokens i
 	}
 
 	// --- Layers 2-5: user → project → team → org (aggregate budgets) ---
-	uid, err := k.keys.Resolve(ctx, rawKey)
-	if err == nil {
-		if !k.checkAggregate(ctx, uid, promptTokens, "user") {
-			return k.reject("user", 0)
-		}
-		pid, err := k.keys.ProjectOfUser(ctx, uid)
-		if err == nil && pid > 0 {
-			if !k.checkAggregate(ctx, pid, promptTokens, "project") {
-				return k.reject("project", 0)
+	// One cached chain snapshot replaces five per-layer lookups.
+	if uid, err := k.keys.Resolve(ctx, rawKey); err == nil {
+		ci, err := k.keys.ChainOfUser(ctx, uid)
+		if err == nil {
+			if !k.checkAggregateLimits(ctx, "user", uid, ci.User, promptTokens) {
+				return k.reject("user", 0)
 			}
-			// --- Layer 4: team (project belongs to a team) ---
-			tid, err := k.keys.TeamOfProject(ctx, pid)
-			if err == nil && tid > 0 {
-				if !k.checkAggregate(ctx, tid, promptTokens, "team") {
-					return k.reject("team", 0)
+			if ci.ProjectID > 0 {
+				if !k.checkAggregateLimits(ctx, "project", ci.ProjectID, ci.Project, promptTokens) {
+					return k.reject("project", 0)
 				}
-				// --- Layer 5: org (team belongs to an org) ---
-				oid, err := k.keys.OrgOfTeam(ctx, tid)
-				if err == nil && oid > 0 {
-					if !k.checkAggregate(ctx, oid, promptTokens, "org") {
-						return k.reject("org", 0)
+				if ci.TeamID > 0 {
+					if !k.checkAggregateLimits(ctx, "team", ci.TeamID, ci.Team, promptTokens) {
+						return k.reject("team", 0)
+					}
+					if ci.OrgID > 0 {
+						if !k.checkAggregateLimits(ctx, "org", ci.OrgID, ci.Org, promptTokens) {
+							return k.reject("org", 0)
+						}
 					}
 				}
 			}
@@ -119,27 +117,10 @@ func (k *budgetLimiter) Allow(ctx context.Context, rawKey string, promptTokens i
 	return 0, true
 }
 
-// checkAggregate enforces one RPM/TPM budget layer (user or project)
-// against a scope id. The scope is the raw id (the layer prefix is
-// applied by the caller via Checker scope names).
-func (k *budgetLimiter) checkAggregate(ctx context.Context, id int64, promptTokens int64, layer string) bool {
-	// layer=user → scope user-{id}; layer=project → project-{id}
-	scope := fmt.Sprintf("%s-%d", layer, id)
-	var limits auth.Limits
-	var err error
-	switch layer {
-	case "user":
-		limits, err = k.keys.UserLimits(ctx, id)
-	case "project":
-		limits, err = k.keys.ProjectLimits(ctx, id)
-	case "team":
-		limits, err = k.keys.TeamLimits(ctx, id)
-	case "org":
-		limits, err = k.keys.OrgLimits(ctx, id)
-	}
-	if err != nil {
-		return true // unknown scope: pass
-	}
+// checkAggregateLimits enforces one RPM/TPM budget layer against a
+// preloaded quota. scopeID is the layer's id (user/project/team/org).
+func (k *budgetLimiter) checkAggregateLimits(ctx context.Context, layer string, scopeID int64, limits auth.Limits, promptTokens int64) bool {
+	scope := fmt.Sprintf("%s-%d", layer, scopeID)
 	if limits.RPM > 0 {
 		if _, ok := k.check.CheckRPM(ctx, scope, limits.RPM); !ok {
 			return false

@@ -11,6 +11,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -182,6 +183,21 @@ func (s *Service) OrgOfTeam(ctx context.Context, teamID int64) (int64, error) {
 	return oid, err
 }
 
+// ChainInfo is the full budget chain of one user, fetched in a single
+// query: user → project → team → org (each with its quota). The gateway
+// enforces all aggregate layers from one cached snapshot instead of
+// five separate lookups.
+type ChainInfo struct {
+	UserID    int64
+	User      Limits // user-level aggregate quota
+	ProjectID int64
+	Project   Limits
+	TeamID    int64
+	Team      Limits
+	OrgID     int64
+	Org       Limits
+}
+
 // Project is layer 3 of the six-layer budget model: a shared budget
 // across multiple users.
 type Project struct {
@@ -241,11 +257,11 @@ func (s *Service) ProjectOfUser(ctx context.Context, userID int64) (int64, error
 // OrgTree is the admin view of the six-layer budget: orgs → teams →
 // projects → users, with each level's quota.
 type OrgTree struct {
-	ID       int64       `json:"id"`
-	Name     string      `json:"name"`
-	RPM      int         `json:"rpm_limit"`
-	TPM      int64       `json:"tpm_limit"`
-	Teams    []TeamNode  `json:"teams"`
+	ID    int64      `json:"id"`
+	Name  string     `json:"name"`
+	RPM   int        `json:"rpm_limit"`
+	TPM   int64      `json:"tpm_limit"`
+	Teams []TeamNode `json:"teams"`
 }
 
 type TeamNode struct {
@@ -572,6 +588,34 @@ func (k *PostgresKeyStore) ResolveUserLimits(ctx context.Context, userID int64) 
 	return k.svc.ResolveUserLimits(ctx, userID)
 }
 
+// ChainOfUser loads the full budget chain in one query (NULL-safe via
+// COALESCE: missing project/team/org resolve to id 0 + zero limits).
+func (k *PostgresKeyStore) ChainOfUser(ctx context.Context, userID int64) (ChainInfo, error) {
+	var ci ChainInfo
+	err := k.svc.pool.QueryRow(ctx, `
+		SELECT u.rpm_limit, u.tpm_limit,
+		       COALESCE(u.project_id, 0),
+		       COALESCE(p.rpm_limit, 0), COALESCE(p.tpm_limit, 0),
+		       COALESCE(p.team_id, 0),
+		       COALESCE(t.rpm_limit, 0), COALESCE(t.tpm_limit, 0),
+		       COALESCE(t.org_id, 0),
+		       COALESCE(o.rpm_limit, 0), COALESCE(o.tpm_limit, 0)
+		FROM users u
+		LEFT JOIN projects p ON p.id = u.project_id
+		LEFT JOIN teams t ON t.id = p.team_id
+		LEFT JOIN orgs o ON o.id = t.org_id
+		WHERE u.id = $1`, userID).Scan(
+		&ci.User.RPM, &ci.User.TPM,
+		&ci.ProjectID, &ci.Project.RPM, &ci.Project.TPM,
+		&ci.TeamID, &ci.Team.RPM, &ci.Team.TPM,
+		&ci.OrgID, &ci.Org.RPM, &ci.Org.TPM)
+	if err != nil {
+		return ChainInfo{}, err
+	}
+	ci.UserID = userID
+	return ci, nil
+}
+
 // ProjectOfUser returns the project a user belongs to (0 = none).
 func (k *PostgresKeyStore) ProjectOfUser(ctx context.Context, userID int64) (int64, error) {
 	return k.svc.ProjectOfUser(ctx, userID)
@@ -689,8 +733,10 @@ func (c *CachedKeyStore) OrgLimits(ctx context.Context, orgID int64) (Limits, er
 // CachedKeyStore wraps a KeyStore with a small TTL cache so the gateway
 // hot path never hits the DB for auth (mirrors the static-key fast path).
 type CachedKeyStore struct {
+	mu    sync.Mutex
 	inner KeyStore
 	cache map[string]cacheEntry
+	chain map[int64]chainEntry
 	ttl   time.Duration
 }
 
@@ -699,31 +745,62 @@ type cacheEntry struct {
 	expires time.Time
 }
 
+type chainEntry struct {
+	info    ChainInfo
+	expires time.Time
+}
+
 // NewCachedKeyStore wraps a resolver with an in-memory TTL cache.
 func NewCachedKeyStore(inner KeyStore, ttl time.Duration) *CachedKeyStore {
 	if ttl <= 0 {
 		ttl = 60 * time.Second
 	}
-	return &CachedKeyStore{inner: inner, cache: map[string]cacheEntry{}, ttl: ttl}
+	return &CachedKeyStore{inner: inner, cache: map[string]cacheEntry{}, chain: map[int64]chainEntry{}, ttl: ttl}
 }
 
 // Resolve implements KeyStore (cache-first; negative entries cached short).
 func (c *CachedKeyStore) Resolve(ctx context.Context, rawKey string) (int64, error) {
 	now := time.Now()
+	c.mu.Lock()
 	if e, ok := c.cache[rawKey]; ok && now.Before(e.expires) {
+		c.mu.Unlock()
 		if e.userID == 0 {
 			return 0, ErrKeyNotFound
 		}
 		return e.userID, nil
 	}
+	c.mu.Unlock()
 	uid, err := c.inner.Resolve(ctx, rawKey)
 	ttl := c.ttl
 	if err != nil {
 		uid = 0
 		ttl = 5 * time.Second // negative cache shorter
 	}
+	c.mu.Lock()
 	c.cache[rawKey] = cacheEntry{userID: uid, expires: now.Add(ttl)}
+	c.mu.Unlock()
 	return uid, err
+}
+
+// ChainOfUser returns the cached budget chain (TTL), loading it from the
+// store on miss. This is the hot path for aggregate quota enforcement:
+// one cache hit replaces five per-layer DB lookups.
+func (c *CachedKeyStore) ChainOfUser(ctx context.Context, userID int64) (ChainInfo, error) {
+	now := time.Now()
+	c.mu.Lock()
+	if e, ok := c.chain[userID]; ok && now.Before(e.expires) {
+		c.mu.Unlock()
+		return e.info, nil
+	}
+	c.mu.Unlock()
+	ci, err := c.inner.(*PostgresKeyStore).ChainOfUser(ctx, userID)
+	if err != nil {
+		return ChainInfo{}, err
+	}
+	c.mu.Lock()
+	c.chain[userID] = chainEntry{info: ci, expires: now.Add(c.ttl)}
+	c.mu.Unlock()
+	return ci, nil
 }
 
 // SessionToken issues a login session token (dev-grade; JWT in production).
