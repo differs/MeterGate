@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeterGate · 预算管理</title>
+<style>
+  :root { --bg:#0f1420; --card:#171e2e; --line:#26314a; --fg:#e6ebf5; --mut:#8a94ad;
+          --acc:#4f8cff; --ok:#34c77b; --warn:#f2b84b; --err:#ff5d5d; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; padding:24px; }
+  h1 { font-size:20px; margin-bottom:16px; display:flex; align-items:center; gap:12px; }
+  h1 .badge { font-size:11px; color:var(--mut); font-weight:400; border:1px solid var(--line); padding:2px 8px; border-radius:99px; }
+  .bar { display:flex; gap:10px; align-items:center; margin-bottom:20px; flex-wrap:wrap; }
+  input, select, button { background:var(--card); border:1px solid var(--line); color:var(--fg);
+    padding:7px 10px; border-radius:6px; font-size:13px; }
+  input:focus, select:focus { outline:1px solid var(--acc); }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#fff; font-weight:600; }
+  .status { font-size:12px; color:var(--mut); }
+  .status.err { color:var(--err); }
+  .org { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:14px; }
+  .org > .head { display:flex; align-items:center; gap:10px; font-weight:600; }
+  .tag { font-size:10px; padding:1px 7px; border-radius:99px; border:1px solid var(--line); color:var(--mut); }
+  .quota { font-size:12px; color:var(--mut); }
+  .quota b { color:var(--fg); }
+  .team { margin:10px 0 4px 18px; padding:10px 12px; border-left:2px solid var(--line); }
+  .team > .head { display:flex; align-items:center; gap:8px; font-weight:500; }
+  .proj { margin:8px 0 4px 16px; padding:8px 12px; border-left:2px solid var(--line); }
+  .proj > .head { display:flex; align-items:center; gap:8px; }
+  .users { margin:6px 0 4px 14px; color:var(--mut); font-size:12px; display:flex; flex-wrap:wrap; gap:6px; }
+  .user { background:var(--bg); border:1px solid var(--line); padding:2px 8px; border-radius:99px; }
+  .acts { margin-left:auto; display:flex; gap:6px; }
+  .acts button { padding:3px 9px; font-size:12px; }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:10; }
+  .modal.open { display:flex; }
+  .modal .box { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px; width:360px; max-width:92vw; }
+  .modal h3 { font-size:15px; margin-bottom:12px; }
+  .modal .row { display:flex; gap:8px; margin-bottom:10px; align-items:center; }
+  .modal .row label { width:110px; color:var(--mut); font-size:12px; }
+  .modal .row input { flex:1; }
+  .empty { color:var(--mut); text-align:center; padding:40px 0; }
+  .hint { font-size:12px; color:var(--mut); margin-bottom:16px; }
+</style>
+</head>
+<body>
+<h1>预算管理 <span class="badge">six-layer budget · org → team → project → user → key → end-user</span></h1>
+
+<div class="bar">
+  <input id="adminkey" type="password" placeholder="Admin Key" style="width:220px">
+  <button class="primary" onclick="loadTree()">连接</button>
+  <button onclick="newOrg()">+ 新建 Org</button>
+  <button onclick="newTeam()">+ 新建 Team</button>
+  <button onclick="newProject()">+ 新建 Project</button>
+  <span class="status" id="status"></span>
+</div>
+<div class="hint">限额单位：RPM = 每分钟请求数（0 = 不限），TPM = 每分钟 token 数（0 = 不限）。</div>
+
+<div id="tree"><div class="empty">请输入 Admin Key 并连接。</div></div>
+
+<div class="modal" id="modal">
+  <div class="box">
+    <h3 id="m-title"></h3>
+    <div class="row"><label>名称</label><input id="m-name" placeholder="名称"></div>
+    <div class="row"><label>RPM 限额</label><input id="m-rpm" type="number" min="0" placeholder="0 = 不限"></div>
+    <div class="row"><label>TPM 限额</label><input id="m-tpm" type="number" min="0" placeholder="0 = 不限"></div>
+    <div class="row"><label id="m-extra-label" hidden></label><input id="m-extra" hidden placeholder=""></div>
+    <div style="text-align:right; margin-top:14px; display:flex; gap:8px; justify-content:flex-end;">
+      <button onclick="closeModal()">取消</button>
+      <button class="primary" id="m-save" onclick="saveModal()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let adminKey = localStorage.getItem('mg_admin_key') || '';
+if (adminKey) { document.getElementById('adminkey').value = adminKey; }
+
+function key() { return document.getElementById('adminkey').value.trim(); }
+function setStatus(msg, err) {
+  const el = document.getElementById('status');
+  el.textContent = msg; el.className = 'status' + (err ? ' err' : '');
+}
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { 'Authorization': 'Bearer ' + key(), 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(method + ' ' + path + ' → ' + res.status);
+  return res.status === 204 ? null : res.json();
+}
+
+async function loadTree() {
+  if (!key()) return setStatus('缺少 Admin Key', true);
+  localStorage.setItem('mg_admin_key', key());
+  try {
+    const tree = await api('GET', '/api/admin/tree');
+    render(tree);
+    setStatus('已连接');
+  } catch (e) { setStatus('连接失败: ' + e.message, true); }
+}
+
+function quota(rpm, tpm) { return rpm > 0 || tpm > 0 ? `RPM <b>${rpm}</b> · TPM <b>${tpm}</b>` : '<i>不限</i>'; }
+
+function render(tree) {
+  const root = document.getElementById('tree');
+  if (!tree.length) { root.innerHTML = '<div class="empty">还没有 Org。点击「+ 新建 Org」开始。</div>'; return; }
+  root.innerHTML = tree.map(o => `
+    <div class="org">
+      <div class="head">🏢 ${esc(o.name)} <span class="tag">org #${o.id}</span>
+        <span class="quota">${quota(o.rpm_limit, o.tpm_limit)}</span>
+        <span class="acts">
+          <button onclick="editLimits('org', ${o.id}, '${esc(o.name)}', ${o.rpm_limit}, ${o.tpm_limit})">限额</button>
+          <button onclick="newTeam(${o.id})">+ Team</button>
+        </span>
+      </div>
+      ${(o.teams||[]).map(t => `
+      <div class="team">
+        <div class="head">👥 ${esc(t.name)} <span class="tag">team #${t.id}</span>
+          <span class="quota">${quota(t.rpm_limit, t.tpm_limit)}</span>
+          <span class="acts">
+            <button onclick="editLimits('team', ${t.id}, '${esc(t.name)}', ${t.rpm_limit}, ${t.tpm_limit})">限额</button>
+            <button onclick="newProject(${t.id})">+ Project</button>
+          </span>
+        </div>
+        ${(t.projects||[]).map(p => `
+        <div class="proj">
+          <div class="head">📦 ${esc(p.name)} <span class="tag">project #${p.id}</span>
+            <span class="quota">${quota(p.rpm_limit, p.tpm_limit)}</span>
+            <span class="acts">
+              <button onclick="editLimits('project', ${p.id}, '${esc(p.name)}', ${p.rpm_limit}, ${p.tpm_limit})">限额</button>
+            </span>
+          </div>
+          <div class="users">
+            ${(p.users||[]).map(u => `<span class="user">${esc(u.username)} #${u.id} · ${u.rpm_limit>0||u.tpm_limit>0 ? 'R'+u.rpm_limit+' T'+u.tpm_limit : '不限'}</span>`).join('')}
+            <button style="padding:1px 8px" onclick="attachUser(${p.id})">+ 用户</button>
+          </div>
+        </div>`).join('')}
+      </div>`).join('')}
+    </div>`).join('');
+}
+
+/* ---- modal-driven actions ---- */
+let mMode = null, mId = 0, mName = '';
+function openModal(title, fields) {
+  mMode = fields.mode; mId = fields.id; mName = fields.name || '';
+  document.getElementById('m-title').textContent = title;
+  document.getElementById('m-name').value = fields.name || '';
+  document.getElementById('m-rpm').value = fields.rpm ?? 0;
+  document.getElementById('m-tpm').value = fields.tpm ?? 0;
+  const el = document.getElementById('m-extra'), lab = document.getElementById('m-extra-label');
+  if (fields.extraLabel) { lab.hidden = false; lab.textContent = fields.extraLabel; el.hidden = false; el.value = fields.extraValue || ''; }
+  else { lab.hidden = true; el.hidden = true; }
+  document.getElementById('modal').classList.add('open');
+}
+function closeModal() { document.getElementById('modal').classList.remove('open'); }
+
+function newOrg() {
+  openModal('新建 Org', { mode: 'create-org', rpm: 0, tpm: 0 });
+}
+function newTeam(orgId) {
+  openModal('新建 Team（挂到 Org）', { mode: 'create-team', rpm: 0, tpm: 0, extraLabel: 'Org ID', extraValue: orgId || '' });
+}
+function newProject(teamId) {
+  openModal('新建 Project（挂到 Team）', { mode: 'create-project', rpm: 0, tpm: 0, extraLabel: 'Team ID', extraValue: teamId || '' });
+}
+function editLimits(layer, id, name, rpm, tpm) {
+  openModal(`设置 ${layer} #${id} 限额`, { mode: 'limits:' + layer, id, name, rpm, tpm });
+}
+async function attachUser(projectId) {
+  const uid = prompt('用户 ID（user id）：');
+  if (!uid) return;
+  try { await api('PUT', '/api/admin/users/' + uid + '/project', { project_id: projectId }); loadTree(); }
+  catch (e) { setStatus('绑定失败: ' + e.message, true); }
+}
+
+async function saveModal() {
+  const name = document.getElementById('m-name').value.trim();
+  const rpm = parseInt(document.getElementById('m-rpm').value) || 0;
+  const tpm = parseInt(document.getElementById('m-tpm').value) || 0;
+  const extra = parseInt(document.getElementById('m-extra').value) || 0;
+  try {
+    if (mMode === 'create-org') await api('POST', '/api/admin/orgs', { name, rpm_limit: rpm, tpm_limit: tpm });
+    else if (mMode === 'create-team') await api('POST', '/api/admin/teams', { name, org_id: extra, rpm_limit: rpm, tpm_limit: tpm });
+    else if (mMode === 'create-project') await api('POST', '/api/admin/projects', { name, rpm_limit: rpm, tpm_limit: tpm })
+      .then(p => api('PUT', '/api/admin/projects/' + p.ID + '/team', { team_id: extra }));
+    else {
+      const layer = mMode.split(':')[1];
+      if (layer === 'org') await api('PUT', '/api/admin/orgs/' + mId + '/limits', { rpm_limit: rpm, tpm_limit: tpm });
+      if (layer === 'team') await api('PUT', '/api/admin/teams/' + mId + '/limits', { rpm_limit: rpm, tpm_limit: tpm });
+      if (layer === 'project') await api('PUT', '/api/admin/projects/' + mId + '/limits', { rpm_limit: rpm, tpm_limit: tpm });
+      if (layer === 'user') await api('PUT', '/api/admin/users/' + mId + '/limits', { rpm_limit: rpm, tpm_limit: tpm });
+    }
+    closeModal(); loadTree();
+  } catch (e) { setStatus('保存失败: ' + e.message, true); }
+}
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+</script>
+</body>
+</html>

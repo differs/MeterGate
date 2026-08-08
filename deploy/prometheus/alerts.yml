@@ -1,0 +1,47 @@
+# MeterGate budget alerting — six-layer quota model.
+#
+# Load with: prometheus --config.file=deploy/prometheus/prometheus.yml
+# (alertmanager receiver optional; rules fire regardless of receivers).
+groups:
+  - name: budget
+    rules:
+      # A configured quota scope is approaching exhaustion. The usage
+      # ratio comes from metergate_quota_usage_ratio (0-1), sampled by
+      # the quota monitor every 30s.
+      - alert: QuotaHighUsage
+        expr: metergate_quota_usage_ratio > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Quota {{ $labels.layer }} scope {{ $labels.scope }} at {{ printf \"%.0f\" ( $value * 100 ) }}%"
+          description: "The {{ $labels.layer }} scope {{ $labels.scope }} has consumed over 80% of its sliding-window budget. Requests may start failing with 429 soon."
+
+      - alert: QuotaExhausted
+        expr: metergate_quota_usage_ratio >= 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Quota {{ $labels.layer }} scope {{ $labels.scope }} exhausted"
+          description: "The {{ $labels.layer }} scope {{ $labels.scope }} is at 100% of its sliding-window budget — every further request returns 429 until the window slides. Raise the limit or contact the customer."
+
+      # Rejection spikes: the gateway started refusing requests at a layer.
+      - alert: QuotaRejectionBurst
+        expr: increase(metergate_rate_limited_total[5m]) > 100
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rate-limit rejections at layer {{ $labels.layer }}"
+          description: "More than 100 requests rejected per 5m at the {{ $labels.layer }} layer — verify the quota configuration."
+
+      # Money-integrity guard: unsettled pre-charges must trend to zero.
+      - alert: FrozenBalanceHigh
+        expr: metergate_frozen_balance_micros > 1000000000
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frozen balance high ({{ $value }} µ)"
+          description: "Unsettled pre-charge balance above 1,000,000,000 µ — settlement may be lagging."

@@ -238,6 +238,168 @@ func (s *Service) ProjectOfUser(ctx context.Context, userID int64) (int64, error
 	return pid, err
 }
 
+// OrgTree is the admin view of the six-layer budget: orgs → teams →
+// projects → users, with each level's quota.
+type OrgTree struct {
+	ID       int64       `json:"id"`
+	Name     string      `json:"name"`
+	RPM      int         `json:"rpm_limit"`
+	TPM      int64       `json:"tpm_limit"`
+	Teams    []TeamNode  `json:"teams"`
+}
+
+type TeamNode struct {
+	ID       int64         `json:"id"`
+	Name     string        `json:"name"`
+	RPM      int           `json:"rpm_limit"`
+	TPM      int64         `json:"tpm_limit"`
+	Projects []ProjectNode `json:"projects"`
+}
+
+type ProjectNode struct {
+	ID    int64      `json:"id"`
+	Name  string     `json:"name"`
+	RPM   int        `json:"rpm_limit"`
+	TPM   int64      `json:"tpm_limit"`
+	Users []UserNode `json:"users"`
+}
+
+type UserNode struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
+	RPM      int    `json:"rpm_limit"`
+	TPM      int64  `json:"tpm_limit"`
+}
+
+// OrgTree returns the full hierarchy with quotas (admin view).
+func (s *Service) OrgTree(ctx context.Context) ([]OrgTree, error) {
+	orgs := []OrgTree{}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, name, rpm_limit, tpm_limit FROM orgs ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	orgIdx := map[int64]int{}
+	for rows.Next() {
+		var o OrgTree
+		if err := rows.Scan(&o.ID, &o.Name, &o.RPM, &o.TPM); err != nil {
+			return nil, err
+		}
+		orgIdx[o.ID] = len(orgs)
+		orgs = append(orgs, o)
+	}
+	rows.Close()
+
+	// teams by org
+	teamIdx := map[int64]int{}
+	if trows, err := s.pool.Query(ctx,
+		`SELECT id, name, org_id, rpm_limit, tpm_limit FROM teams ORDER BY id`); err == nil {
+		for trows.Next() {
+			var t TeamNode
+			var oid int64
+			if err := trows.Scan(&t.ID, &t.Name, &oid, &t.RPM, &t.TPM); err != nil {
+				continue
+			}
+			if oi, ok := orgIdx[oid]; ok {
+				teamIdx[t.ID] = len(orgs[oi].Teams)
+				orgs[oi].Teams = append(orgs[oi].Teams, t)
+			}
+		}
+		trows.Close()
+	}
+
+	// projects by team
+	projIdx := map[int64]int{}
+	if prows, err := s.pool.Query(ctx,
+		`SELECT id, name, team_id, rpm_limit, tpm_limit FROM projects ORDER BY id`); err == nil {
+		for prows.Next() {
+			var p ProjectNode
+			var tid int64
+			if err := prows.Scan(&p.ID, &p.Name, &tid, &p.RPM, &p.TPM); err != nil {
+				continue
+			}
+			if ti, ok := teamIdx[tid]; ok {
+				for oi := range orgs {
+					if ti < len(orgs[oi].Teams) && orgs[oi].Teams[ti].ID == tid {
+						projIdx[p.ID] = len(orgs[oi].Teams[ti].Projects)
+						orgs[oi].Teams[ti].Projects = append(orgs[oi].Teams[ti].Projects, p)
+						break
+					}
+				}
+			}
+		}
+		prows.Close()
+	}
+
+	// users by project
+	if urows, err := s.pool.Query(ctx,
+		`SELECT id, username, project_id, rpm_limit, tpm_limit FROM users ORDER BY id`); err == nil {
+		for urows.Next() {
+			var u UserNode
+			var pid int64
+			if err := urows.Scan(&u.ID, &u.Username, &pid, &u.RPM, &u.TPM); err != nil {
+				continue
+			}
+			for oi := range orgs {
+				for ti := range orgs[oi].Teams {
+					for pi := range orgs[oi].Teams[ti].Projects {
+						if orgs[oi].Teams[ti].Projects[pi].ID == pid {
+							orgs[oi].Teams[ti].Projects[pi].Users = append(orgs[oi].Teams[ti].Projects[pi].Users, u)
+						}
+					}
+				}
+			}
+		}
+		urows.Close()
+	}
+	return orgs, nil
+}
+
+// QuotaScopes returns every configured aggregate quota (org/team/
+// project/user with RPM or TPM > 0) for the budget monitor.
+func (s *Service) QuotaScopes(ctx context.Context) ([]ScopeRow, error) {
+	var out []ScopeRow
+	collect := func(layer string, q string) error {
+		rows, err := s.pool.Query(ctx, q)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r ScopeRow
+			if err := rows.Scan(&r.ID, &r.RPM, &r.TPM); err != nil {
+				continue
+			}
+			r.Layer = layer
+			if r.RPM > 0 || r.TPM > 0 {
+				out = append(out, r)
+			}
+		}
+		return rows.Err()
+	}
+	queries := map[string]string{
+		"org":     `SELECT id, rpm_limit, tpm_limit FROM orgs`,
+		"team":    `SELECT id, rpm_limit, tpm_limit FROM teams`,
+		"project": `SELECT id, rpm_limit, tpm_limit FROM projects`,
+		"user":    `SELECT id, rpm_limit, tpm_limit FROM users`,
+	}
+	for layer, q := range queries {
+		if err := collect(layer, q); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// ScopeRow is one configured quota (monitor input).
+type ScopeRow struct {
+	Layer string
+	ID    int64
+	RPM   int
+	TPM   int64
+}
+
 // LoginVerified bypasses the password check (internal use: OIDC users).
 func (s *Service) LoginVerified(ctx context.Context, username string) (*User, error) {
 	var u User

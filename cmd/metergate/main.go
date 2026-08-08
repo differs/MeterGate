@@ -59,6 +59,7 @@ import (
 	"github.com/differs/MeterGate/internal/ledger"
 	"github.com/differs/MeterGate/internal/metering"
 	"github.com/differs/MeterGate/internal/obs"
+	"github.com/differs/MeterGate/internal/quota"
 	"github.com/differs/MeterGate/internal/payment"
 	"github.com/differs/MeterGate/internal/portal"
 	"github.com/differs/MeterGate/internal/reconciliation"
@@ -224,8 +225,10 @@ func main() {
 
 	// --- P0 commercial: auth + payment + portal (requires PG) ---
 	var keyStore *auth.CachedKeyStore
+	var authSvc *auth.Service
 	if pgDSN != "" {
-		authSvc, err := auth.NewService(ctx, pgDSN)
+		var err error
+		authSvc, err = auth.NewService(ctx, pgDSN)
 		if err != nil {
 			logger.Error("auth service failed, portal disabled", "err", err)
 		} else {
@@ -352,6 +355,22 @@ func main() {
 			rdb := precharger.Redis()
 			if rdb != nil {
 				limiter := newBudgetLimiter(rdb, keyStore, metrics)
+
+				// Budget monitor: sample sliding-window usage of every
+				// configured quota scope (org/team/project/user) into
+				// metergate_quota_usage_ratio for alerting.
+				qm := quota.NewMonitor(rdb, metrics, logger).Configure(func(ctx context.Context) ([]quota.Scope, error) {
+					rows, err := authSvc.QuotaScopes(ctx)
+					if err != nil {
+						return nil, err
+					}
+					out := make([]quota.Scope, 0, len(rows))
+					for _, r := range rows {
+						out = append(out, quota.Scope{Layer: r.Layer, ID: r.ID, RPM: int64(r.RPM), TPM: r.TPM})
+					}
+					return out, nil
+				})
+				go qm.Run(context.Background())
 				opts = append(opts, gateway.WithRateLimiter(limiter))
 				logger.Info("rate limiting enabled (6-layer budget: end_user/key/user/project/team/org)")
 			}

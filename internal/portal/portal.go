@@ -93,6 +93,7 @@ func (api *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/projects", api.createProject)
 	mux.HandleFunc("PUT /api/admin/projects/{id}/limits", api.setProjectLimits)
 	mux.HandleFunc("PUT /api/admin/projects/{id}/team", api.setProjectTeam)
+	mux.HandleFunc("GET /api/admin/tree", api.orgTree)
 	mux.HandleFunc("POST /api/admin/orgs", api.createOrg)
 	mux.HandleFunc("PUT /api/admin/orgs/{id}/limits", api.setOrgLimits)
 	mux.HandleFunc("POST /api/admin/teams", api.createTeam)
@@ -288,6 +289,21 @@ func (api *API) setProjectTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]any{"project_id": pid, "team_id": req.TeamID})
+}
+
+// orgTree returns the full org → team → project → user hierarchy with
+// quotas (admin view for the management UI).
+func (api *API) orgTree(w http.ResponseWriter, r *http.Request) {
+	if !api.adminOnly(r) {
+		http.Error(w, `{"error":"admin key required"}`, http.StatusUnauthorized)
+		return
+	}
+	tree, err := api.auth.OrgTree(r.Context())
+	if err != nil {
+		http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(tree)
 }
 
 // createOrg makes an org with an aggregate quota (layer 5).

@@ -40,6 +40,7 @@ type Metrics struct {
 
 	// --- Rate limiting ---
 	RateLimitedTotal *prometheus.CounterVec // layer: key|user
+	QuotaUsageRatio  *prometheus.GaugeVec   // layer+scope: current window usage 0-1
 
 	// --- Routing health ---
 	ChannelHealth       *prometheus.GaugeVec // 1 = healthy
@@ -118,6 +119,10 @@ func New() *Metrics {
 			Name: "metergate_rate_limited_total",
 			Help: "Requests rejected by the quota layer (six-layer budget model).",
 		}, []string{"layer"}),
+		QuotaUsageRatio: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "metergate_quota_usage_ratio",
+			Help: "Current sliding-window usage of a quota scope (0-1; 1 = exhausted).",
+		}, []string{"layer", "scope"}),
 
 		ChannelHealth: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "metergate_channel_health",
